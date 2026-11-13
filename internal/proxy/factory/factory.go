@@ -47,15 +47,21 @@ func ResolveSNIDirection(route config.RouteCandidate) (direction, outerSNI, inne
 	innerHost = route.CleanSNI
 	dir := route.SNISPFDirection
 	if dir == "" {
-		if route.StealthMode == ModeSNIFront || (route.SpoofSNI != "" && route.SpoofSNI != route.CleanSNI) {
+		switch {
+		case route.StealthMode == ModeSNIFront:
 			dir = config.SNISPFDirectionFronting
-		} else {
+		case route.SpoofSNI != "" && route.SpoofSNI != route.CleanSNI:
+			dir = config.SNISPFDirectionFronting
+		default:
 			dir = config.SNISPFDirectionLegacy
 		}
 	}
 
-	if dir == config.SNISPFDirectionFronting && route.SpoofSNI != "" {
-		return config.SNISPFDirectionFronting, route.SpoofSNI, innerHost
+	if dir == config.SNISPFDirectionFronting {
+		if route.SpoofSNI != "" {
+			return config.SNISPFDirectionFronting, route.SpoofSNI, innerHost
+		}
+		return config.SNISPFDirectionFronting, innerHost, innerHost
 	}
 	return config.SNISPFDirectionLegacy, innerHost, innerHost
 }
@@ -189,7 +195,7 @@ func upgradeWebSocket(conn net.Conn, host, path string) error {
 	wsKey := base64.StdEncoding.EncodeToString(keyBytes[:])
 
 	req := fmt.Sprintf(
-		"GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36\r\n\r\n",
+		"GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36\r\n\r\n",
 		path, host, wsKey,
 	)
 	if _, err := conn.Write([]byte(req)); err != nil {
@@ -214,3 +220,4 @@ func upgradeWebSocket(conn net.Conn, host, path string) error {
 	}
 	return nil
 }
+
