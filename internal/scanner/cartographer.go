@@ -42,35 +42,44 @@ func ExpandCIDR(cidr string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if ipnet == nil || ipnet.IP == nil {
+		return nil, fmt.Errorf("invalid CIDR %q", cidr)
+	}
+
+	base := ipnet.IP.Mask(ipnet.Mask)
 	ones, bits := ipnet.Mask.Size()
+	if bits < ones || bits < 0 || ones < 0 {
+		return nil, fmt.Errorf("invalid CIDR mask %q", cidr)
+	}
+
 	hostBits := bits - ones
 	if hostBits < 0 || hostBits > 8 {
 		return nil, fmt.Errorf("CIDR contains more than %d addresses; use an explicitly scoped smaller range", maxCIDRAddresses)
 	}
 
-	count := 1 << hostBits
-	if count > maxCIDRAddresses {
-		return nil, fmt.Errorf("CIDR contains %d addresses; maximum is %d", count, maxCIDRAddresses)
+	count64 := uint64(1) << hostBits
+	if count64 > maxCIDRAddresses {
+		return nil, fmt.Errorf("CIDR contains %d addresses; maximum is %d", count64, maxCIDRAddresses)
 	}
+	count := int(count64)
 
-	ip := append(net.IP(nil), ipnet.IP...)
 	ips := make([]string, 0, count)
 	for i := 0; i < count; i++ {
-		ips = append(ips, ip.String())
-		if i+1 < count {
-			incrementIP(ip)
-		}
+		ips = append(ips, append(net.IP(nil), base...).String())
+		base = incrementIP(base)
 	}
 	return ips, nil
 }
 
-func incrementIP(ip net.IP) {
-	for j := len(ip) - 1; j >= 0; j-- {
-		ip[j]++
-		if ip[j] != 0 {
-			break
+func incrementIP(ip net.IP) net.IP {
+	next := append(net.IP(nil), ip...)
+	for j := len(next) - 1; j >= 0; j-- {
+		next[j]++
+		if next[j] != 0 {
+			return next
 		}
 	}
+	return next
 }
 
 func (c *Cartographer) Run(ctx context.Context, targetIPs []string, workerHost string) *IntelligenceReport {
@@ -209,3 +218,4 @@ func (c *Cartographer) Run(ctx context.Context, targetIPs []string, workerHost s
 	}
 	return report
 }
+

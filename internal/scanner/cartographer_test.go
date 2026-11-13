@@ -33,8 +33,20 @@ func TestExpandCIDRIPv6(t *testing.T) {
 	}
 }
 
+func TestExpandCIDRIPv4SingleHost(t *testing.T) {
+	got, err := ExpandCIDR("192.0.2.10/32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"192.0.2.10"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ExpandCIDR() = %v, want %v", got, want)
+	}
+}
+
 func TestExpandCIDRRejectsOversizedRange(t *testing.T) {
 	if _, err := ExpandCIDR("192.0.2.0/23"); err == nil {
 		t.Fatal("expected oversized CIDR to be rejected")
 	}
 }
+
