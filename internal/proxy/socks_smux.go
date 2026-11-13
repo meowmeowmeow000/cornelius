@@ -319,7 +319,7 @@ func (s *smuxSession) OpenStream(ctx context.Context, host string, port uint16) 
 		return nil, err
 	}
 
-	// Verify Worker liveness within 5s so blackholed sockets are evicted immediately.
+	// Verify worker liveness within 5s so blackholed sessions do not remain active.
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 	poll := time.NewTicker(50 * time.Millisecond)
@@ -509,6 +509,15 @@ func StartSOCKS5Server(ctx context.Context, listenAddr string, warmPool *pool.Wa
 	}
 }
 
+func supportsNoAuth(methods []byte) bool {
+	for _, method := range methods {
+		if method == 0x00 {
+			return true
+		}
+	}
+	return false
+}
+
 func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxManager) {
 	defer client.Close()
 	_ = client.SetDeadline(time.Now().Add(15 * time.Second))
@@ -521,12 +530,16 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 	if _, err := io.ReadFull(client, methods); err != nil {
 		return
 	}
+	if !supportsNoAuth(methods) {
+		_, _ = client.Write([]byte{0x05, 0xFF})
+		return
+	}
 	if _, err := client.Write([]byte{0x05, 0x00}); err != nil {
 		return
 	}
 
 	var req [4]byte
-	if _, err := io.ReadFull(client, req[:]); err != nil || req[0] != 0x05 || req[1] != 0x01 {
+	if _, err := io.ReadFull(client, req[:]); err != nil || req[0] != 0x05 || req[1] != 0x01 || req[2] != 0x00 {
 		_, _ = client.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
@@ -583,6 +596,17 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 
 	telemetry.ActiveStreams.Add(1)
 	defer telemetry.ActiveStreams.Add(^uint64(0))
+
+	// Ensure daemon shutdown interrupts both copy loops for active clients.
+	stopClose := make(chan struct{})
+	defer close(stopClose)
+	go func() {
+		select {
+		case <-parentCtx.Done():
+			_ = client.Close()
+		case <-stopClose:
+		}
+	}()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
