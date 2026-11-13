@@ -1,6 +1,11 @@
 package proxy
 
-import "testing"
+import (
+	"context"
+	"net"
+	"testing"
+	"time"
+)
 
 func TestOpenStreamDoesNotWaitForUnrelatedSessionTraffic(t *testing.T) {
 	server, client := net.Pipe()
@@ -35,3 +40,4 @@ func TestOpenStreamDoesNotWaitForUnrelatedSessionTraffic(t *testing.T) {
 		t.Fatal("OpenStream() did not register the stream")
 	}
 }
+

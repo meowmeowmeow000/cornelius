@@ -1,14 +1,11 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -38,135 +35,74 @@ func (w *wsConn) WriteBinary(payload []byte) error {
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()
 
-	var mask [4]byte
-	if _, err := rand.Read(mask[:]); err != nil {
+	if _, err := w.raw.Write(payload); err != nil {
 		return err
-	}
-
-	n := len(payload)
-	var hdr []byte
-	switch {
-	case n < 126:
-		hdr = make([]byte, 2+4)
-		hdr[0] = 0x82
-		hdr[1] = 0x80 | byte(n)
-		copy(hdr[2:6], mask[:])
-	case n <= 65535:
-		hdr = make([]byte, 4+4)
-		hdr[0] = 0x82
-		hdr[1] = 0x80 | 126
-		binary.BigEndian.PutUint16(hdr[2:4], uint16(n))
-		copy(hdr[4:8], mask[:])
-	default:
-		hdr = make([]byte, 10+4)
-		hdr[0] = 0x82
-		hdr[1] = 0x80 | 127
-		binary.BigEndian.PutUint64(hdr[2:10], uint64(n))
-		copy(hdr[10:14], mask[:])
-	}
-
-	masked := make([]byte, n)
-	for i := 0; i < n; i++ {
-		masked[i] = payload[i] ^ mask[i&3]
-	}
-
-	if _, err := w.raw.Write(hdr); err != nil {
-		return err
-	}
-	if n > 0 {
-		if _, err := w.raw.Write(masked); err != nil {
-			return err
-		}
 	}
 	return nil
-}
-
-func (w *wsConn) writeControl(opcode byte, payload []byte) error {
-	w.writeMu.Lock()
-	defer w.writeMu.Unlock()
-
-	var mask [4]byte
-	_, _ = rand.Read(mask[:])
-	n := len(payload)
-	if n > 125 {
-		n = 125
-	}
-	hdr := make([]byte, 6+n)
-	hdr[0] = 0x80 | opcode
-	hdr[1] = 0x80 | byte(n)
-	copy(hdr[2:6], mask[:])
-	for i := 0; i < n; i++ {
-		hdr[6+i] = payload[i] ^ mask[i&3]
-	}
-	_, err := w.raw.Write(hdr)
-	return err
 }
 
 func (w *wsConn) ReadMessage() ([]byte, error) {
 	w.readMu.Lock()
 	defer w.readMu.Unlock()
 
-	var msg bytes.Buffer
-	for {
-		var hdr [2]byte
-		if _, err := io.ReadFull(w.raw, hdr[:]); err != nil {
+	var hdr [2]byte
+	if _, err := io.ReadFull(w.raw, hdr[:]); err != nil {
+		return nil, err
+	}
+	fin := (hdr[0] & 0x80) != 0
+	opcode := hdr[0] & 0x0F
+	masked := (hdr[1] & 0x80) != 0
+	length := uint64(hdr[1] & 0x7F)
+
+	if length == 126 {
+		var ext [2]byte
+		if _, err := io.ReadFull(w.raw, ext[:]); err != nil {
 			return nil, err
 		}
-		fin := (hdr[0] & 0x80) != 0
-		opcode := hdr[0] & 0x0F
-		masked := (hdr[1] & 0x80) != 0
-		length := uint64(hdr[1] & 0x7F)
-
-		if length == 126 {
-			var ext [2]byte
-			if _, err := io.ReadFull(w.raw, ext[:]); err != nil {
-				return nil, err
-			}
-			length = uint64(binary.BigEndian.Uint16(ext[:]))
-		} else if length == 127 {
-			var ext [8]byte
-			if _, err := io.ReadFull(w.raw, ext[:]); err != nil {
-				return nil, err
-			}
-			length = binary.BigEndian.Uint64(ext[:])
+		length = uint64(binary.BigEndian.Uint16(ext[:]))
+	} else if length == 127 {
+		var ext [8]byte
+		if _, err := io.ReadFull(w.raw, ext[:]); err != nil {
+			return nil, err
 		}
-		if length > 16*1024*1024 {
-			return nil, errors.New("websocket frame exceeds 16MB limit")
-		}
+		length = binary.BigEndian.Uint64(ext[:])
+	}
+	if length > 16*1024*1024 {
+		return nil, errors.New("websocket frame exceeds 16MB limit")
+	}
 
-		var mask [4]byte
+	var mask [4]byte
+	if masked {
+		if _, err := io.ReadFull(w.raw, mask[:]); err != nil {
+			return nil, err
+		}
+	}
+	payload := make([]byte, length)
+	if length > 0 {
+		if _, err := io.ReadFull(w.raw, payload); err != nil {
+			return nil, err
+		}
 		if masked {
-			if _, err := io.ReadFull(w.raw, mask[:]); err != nil {
-				return nil, err
+			for i := range payload {
+				payload[i] ^= mask[i&3]
 			}
 		}
+	}
 
-		payload := make([]byte, length)
-		if length > 0 {
-			if _, err := io.ReadFull(w.raw, payload); err != nil {
-				return nil, err
-			}
-			if masked {
-				for i := range payload {
-					payload[i] ^= mask[i&3]
-				}
-			}
+	switch opcode {
+	case 0x08:
+		return nil, io.EOF
+	case 0x09:
+		return payload, nil
+	case 0x0A:
+		return nil, nil
+	case 0x00, 0x01, 0x02:
+		if fin {
+			return payload, nil
 		}
-
-		switch opcode {
-		case 0x08:
-			return nil, io.EOF
-		case 0x09:
-			_ = w.writeControl(0x0A, payload)
-			continue
-		case 0x0A:
-			continue
-		case 0x00, 0x01, 0x02:
-			msg.Write(payload)
-			if fin {
-				return msg.Bytes(), nil
-			}
-		}
+		return payload, nil
+	default:
+		return nil, nil
 	}
 }
 
@@ -239,6 +175,9 @@ func (s *smuxSession) readLoop() {
 		if err != nil {
 			return
 		}
+		if len(msg) == 0 {
+			continue
+		}
 		s.lastRx.Store(time.Now().UnixNano())
 		rxBuf = append(rxBuf, msg...)
 		for len(rxBuf) >= smuxHdrSize {
@@ -303,10 +242,6 @@ func (s *smuxSession) OpenStream(ctx context.Context, host string, port uint16) 
 	s.streams[id] = st
 	s.mu.Unlock()
 
-	// Do not anchor stream success to a session-wide lastRx timestamp. Unrelated
-	// traffic on the same session can advance that timestamp and incorrectly make
-	// a new stream appear ready. Treat the local frame dispatch as the initiation
-	// point and rely on actual IO errors / session shutdown to detect failure.
 	if err := s.sendFrame(cmdSYN, id, nil); err != nil {
 		st.Close()
 		return nil, err
@@ -316,21 +251,18 @@ func (s *smuxSession) OpenStream(ctx context.Context, host string, port uint16) 
 	hdr[0] = byte(len(host))
 	copy(hdr[1:1+len(host)], host)
 	binary.BigEndian.PutUint16(hdr[1+len(host):], port)
-
 	if err := s.sendFrame(cmdPSH, id, hdr); err != nil {
 		st.Close()
 		return nil, err
 	}
 
-	// A session-wide liveness check is still useful for blackholed workers, but it
-	// must not gate stream creation itself. If the socket is dead, the next I/O will
-	// fail naturally; if it is alive, the stream is already created.
 	select {
 	case <-ctx.Done():
 		st.Close()
 		return nil, ctx.Err()
 	default:
 	}
+
 	return st, nil
 }
 
