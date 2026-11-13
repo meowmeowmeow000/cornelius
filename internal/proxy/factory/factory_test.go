@@ -1,10 +1,6 @@
 package factory
 
-import (
-	"testing"
-
-	"cornelius/internal/config"
-)
+import "testing"
 
 func TestResolveSNIDirectionHonorsExplicitFrontingMode(t *testing.T) {
 	route := config.RouteCandidate{
