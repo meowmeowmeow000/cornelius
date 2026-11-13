@@ -1,0 +1,86 @@
+{
+  "version": "1.2-cornelius",
+  "worker_host": "bold-heart-a6e2.nedaymarg.workers.dev",
+  "expected_ttl": 56,
+  "operational_doctrine": {
+    "telemetry_polling_ms": 3000,
+    "max_acceptable_latency_ms": 800,
+    "fallback_threshold_streak": 3
+  },
+  "modules": {
+    "xdp_shield": {
+      "mode": "adaptive",
+      "expected_ttl": 56,
+      "ttl_tolerance": 4,
+      "rst_burst_threshold": 5
+    },
+    "stealth_factory": {
+      "snispf_direction": "fronting",
+      "default_spoof_sni": "www.speedtest.net",
+      "default_ws_path": "/secret-knock-99",
+      "primary_mode": "tls_frag",
+      "fallback_mode": "tls_micro_frag",
+      "fragmentation_delay_ms": 2,
+      "jitter_ms": 2,
+      "allow_insecure_certs": false
+    },
+    "warm_pool": {
+      "target_capacity": 3,
+      "keepalive_interval_sec": 10
+    }
+  },
+  "contingency_matrix": [
+    { "condition": "http_403_forbidden", "action": "escalate_stealth_mode" },
+    { "condition": "dpi_tls_reset", "action": "escalate_stealth_mode" },
+    { "condition": "dial_timeout", "action": "flush_pool_and_rotate_ip" },
+    { "condition": "dial_unreachable", "action": "flush_pool_and_rotate_ip" },
+    { "condition": "tcp_rst_storm", "action": "engage_xdp_lockdown" }
+  ],
+  "primary_route": {
+    "target_ip": "104.18.2.161",
+    "target_port": 443,
+    "snispf_direction": "fronting",
+    "spoof_sni": "www.speedtest.net",
+    "clean_sni": "bold-heart-a6e2.nedaymarg.workers.dev",
+    "stealth_mode": "tls_frag",
+    "fingerprint": "chrome_auto",
+    "expected_ttl": 56,
+    "dpi_distance_hops": 3,
+    "decoy_ttl": 3,
+    "tls_handshake_ms": 42,
+    "ws_verified": true,
+    "confidence_score": 96
+  },
+  "failover_routes": [
+    {
+      "target_ip": "104.18.3.161",
+      "target_port": 443,
+      "snispf_direction": "fronting",
+      "spoof_sni": "www.speedtest.net",
+      "clean_sni": "bold-heart-a6e2.nedaymarg.workers.dev",
+      "stealth_mode": "tls_frag",
+      "fingerprint": "ios_auto",
+      "expected_ttl": 56,
+      "dpi_distance_hops": 3,
+      "decoy_ttl": 3,
+      "tls_handshake_ms": 48,
+      "ws_verified": true,
+      "confidence_score": 95
+    },
+    {
+      "target_ip": "172.67.128.1",
+      "target_port": 443,
+      "snispf_direction": "legacy",
+      "spoof_sni": "www.cloudflare.com",
+      "clean_sni": "bold-heart-a6e2.nedaymarg.workers.dev",
+      "stealth_mode": "tls_micro_frag",
+      "fingerprint": "firefox_auto",
+      "expected_ttl": 55,
+      "dpi_distance_hops": 4,
+      "decoy_ttl": 4,
+      "tls_handshake_ms": 61,
+      "ws_verified": true,
+      "confidence_score": 93
+    }
+  ]
+}

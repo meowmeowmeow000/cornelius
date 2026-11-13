@@ -1,0 +1,19 @@
+[Unit]
+Description=Cornelius v1.2.0 DPI-Bypass Proxy & eBPF XDP Shield Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+RuntimeDirectory=cornelius
+RuntimeDirectoryMode=0700
+ExecStart=/bin/sh -c 'IFACE=$$(ip route show default | awk "/default/ {print \$$5; exit}"); exec /usr/local/bin/cornelius -i "$$IFACE" -c /etc/cornelius/combat.profile -l 127.0.0.1:40443'
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=65535
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_SYS_ADMIN
+
+[Install]
+WantedBy=multi-user.target
