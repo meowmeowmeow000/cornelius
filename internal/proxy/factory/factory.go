@@ -61,7 +61,10 @@ func ResolveSNIDirection(route config.RouteCandidate) (direction, outerSNI, inne
 		if route.SpoofSNI != "" {
 			return config.SNISPFDirectionFronting, route.SpoofSNI, innerHost
 		}
-		return config.SNISPFDirectionFronting, innerHost, innerHost
+		// Fronting without a distinct outer SNI is a no-op and can accidentally look
+		// like legacy traffic while still claiming a fronting direction. Fall back to
+		// legacy instead of silently treating an invalid fronting route as active.
+		return config.SNISPFDirectionLegacy, innerHost, innerHost
 	}
 	return config.SNISPFDirectionLegacy, innerHost, innerHost
 }
