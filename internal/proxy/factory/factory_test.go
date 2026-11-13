@@ -1,6 +1,10 @@
 package factory
 
-import "testing"
+import (
+	"testing"
+
+	"cornelius/internal/config"
+)
 
 func TestResolveSNIDirectionHonorsExplicitFrontingMode(t *testing.T) {
 	route := config.RouteCandidate{
@@ -37,4 +41,3 @@ func TestResolveSNIDirectionUsesSpoofSNIWhenPresent(t *testing.T) {
 		t.Fatalf("ResolveSNIDirection() innerHost = %q, want %q", inner, route.CleanSNI)
 	}
 }
-
