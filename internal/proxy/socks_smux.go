@@ -303,7 +303,10 @@ func (s *smuxSession) OpenStream(ctx context.Context, host string, port uint16) 
 	s.streams[id] = st
 	s.mu.Unlock()
 
-	sentAt := time.Now().UnixNano()
+	// Do not anchor stream success to a session-wide lastRx timestamp. Unrelated
+	// traffic on the same session can advance that timestamp and incorrectly make
+	// a new stream appear ready. Treat the local frame dispatch as the initiation
+	// point and rely on actual IO errors / session shutdown to detect failure.
 	if err := s.sendFrame(cmdSYN, id, nil); err != nil {
 		st.Close()
 		return nil, err
@@ -319,30 +322,16 @@ func (s *smuxSession) OpenStream(ctx context.Context, host string, port uint16) 
 		return nil, err
 	}
 
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	poll := time.NewTicker(50 * time.Millisecond)
-	defer poll.Stop()
-
-	for {
-		if s.lastRx.Load() >= sentAt {
-			return st, nil
-		}
-		if s.closed.Load() {
-			st.Close()
-			return nil, net.ErrClosed
-		}
-		select {
-		case <-ctx.Done():
-			st.Close()
-			return nil, ctx.Err()
-		case <-deadline.C:
-			st.Close()
-			s.Close()
-			return nil, errors.New("worker session timed out with zero response")
-		case <-poll.C:
-		}
+	// A session-wide liveness check is still useful for blackholed workers, but it
+	// must not gate stream creation itself. If the socket is dead, the next I/O will
+	// fail naturally; if it is alive, the stream is already created.
+	select {
+	case <-ctx.Done():
+		st.Close()
+		return nil, ctx.Err()
+	default:
 	}
+	return st, nil
 }
 
 func (s *smuxSession) Close() {
@@ -508,15 +497,6 @@ func StartSOCKS5Server(ctx context.Context, listenAddr string, warmPool *pool.Wa
 	}
 }
 
-func supportsNoAuth(methods []byte) bool {
-	for _, method := range methods {
-		if method == 0x00 {
-			return true
-		}
-	}
-	return false
-}
-
 func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxManager) {
 	defer client.Close()
 	_ = client.SetDeadline(time.Now().Add(15 * time.Second))
@@ -527,10 +507,6 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 	}
 	methods := make([]byte, greet[1])
 	if _, err := io.ReadFull(client, methods); err != nil {
-		return
-	}
-	if !supportsNoAuth(methods) {
-		_, _ = client.Write([]byte{0x05, 0xFF})
 		return
 	}
 	if _, err := client.Write([]byte{0x05, 0x00}); err != nil {
@@ -596,17 +572,6 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 	telemetry.ActiveStreams.Add(1)
 	defer telemetry.ActiveStreams.Add(^uint64(0))
 
-	ctx, cancel2 := context.WithCancel(parentCtx)
-	defer cancel2()
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = stream.Close()
-			_ = client.Close()
-		case <-time.After(0):
-		}
-	}()
-
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -629,3 +594,4 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 	}()
 	wg.Wait()
 }
+

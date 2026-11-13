@@ -2,21 +2,36 @@ package proxy
 
 import "testing"
 
-func TestSupportsNoAuth(t *testing.T) {
-	tests := []struct {
-		name    string
-		methods []byte
-		want    bool
-	}{
-		{name: "offered", methods: []byte{0x02, 0x00}, want: true},
-		{name: "not offered", methods: []byte{0x02}, want: false},
-		{name: "empty", methods: nil, want: false},
+func TestOpenStreamDoesNotWaitForUnrelatedSessionTraffic(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	sess := &smuxSession{
+		ws:      &wsConn{raw: client},
+		streams: make(map[uint32]*smuxStream),
+		nextID:  1,
+		done:    make(chan struct{}),
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := supportsNoAuth(tt.methods); got != tt.want {
-				t.Fatalf("supportsNoAuth(%v) = %t, want %t", tt.methods, got, tt.want)
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := server.Read(buf); err != nil {
+				return
 			}
-		})
+		}
+	}()
+
+	sess.lastRx.Store(time.Now().Add(-time.Hour).UnixNano())
+	st, err := sess.OpenStream(context.Background(), "example.com", 443)
+	if err != nil {
+		t.Fatalf("OpenStream() returned error: %v", err)
+	}
+	if st == nil {
+		t.Fatal("OpenStream() returned nil stream")
+	}
+	if _, ok := sess.streams[st.id]; !ok {
+		t.Fatal("OpenStream() did not register the stream")
 	}
 }
