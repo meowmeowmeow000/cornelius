@@ -597,12 +597,14 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 	telemetry.ActiveStreams.Add(1)
 	defer telemetry.ActiveStreams.Add(^uint64(0))
 
-	// Ensure daemon shutdown interrupts both copy loops for active clients.
 	stopClose := make(chan struct{})
 	defer close(stopClose)
+	ctx, cancel2 := context.WithCancel(parentCtx)
+	defer cancel2()
 	go func() {
 		select {
-		case <-parentCtx.Done():
+		case <-ctx.Done():
+			_ = stream.Close()
 			_ = client.Close()
 		case <-stopClose:
 		}
