@@ -2,7 +2,7 @@ BINARY_DAEMON := bin/cornelius
 BINARY_TUI    := bin/cornelius-tui
 ARCH_INCLUDE  := /usr/include/$(shell uname -m)-linux-gnu
 
-.PHONY: all ebpf build tui test install-caps clean
+.PHONY: all ebpf build tui test vet install-caps clean
 
 all: build tui
 
@@ -18,7 +18,10 @@ tui:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BINARY_TUI) ./cmd/tui
 
 test:
-	go test -v ./internal/scanner/...
+	go test ./...
+
+vet:
+	go vet ./...
 
 install-caps: build
 	sudo setcap cap_net_raw,cap_net_admin,cap_bpf+ep $(BINARY_DAEMON)
