@@ -1,7 +1,6 @@
 package scanner
 
 import (
-	"net"
 	"reflect"
 	"testing"
 )
@@ -26,27 +25,30 @@ func TestExpandCIDRIPv6(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ExpandCIDR() = %v, want %v", got, want)
 	}
-	for _, address := range got {
-		if net.ParseIP(address) == nil {
-			t.Fatalf("invalid returned IP %q", address)
-		}
-	}
-}
-
-func TestExpandCIDRIPv4SingleHost(t *testing.T) {
-	got, err := ExpandCIDR("192.0.2.10/32")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"192.0.2.10"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ExpandCIDR() = %v, want %v", got, want)
-	}
 }
 
 func TestExpandCIDRRejectsOversizedRange(t *testing.T) {
 	if _, err := ExpandCIDR("192.0.2.0/23"); err == nil {
 		t.Fatal("expected oversized CIDR to be rejected")
+	}
+}
+
+func TestExpandCIDRHandlesSingleAddressRanges(t *testing.T) {
+	for _, tc := range []struct {
+		cidr string
+		want []string
+	}{
+		{"192.0.2.10/32", []string{"192.0.2.10"}},
+		{"2001:db8::1/128", []string{"2001:db8::1"}},
+		{"192.0.2.0/31", []string{"192.0.2.0", "192.0.2.1"}},
+	} {
+		got, err := ExpandCIDR(tc.cidr)
+		if err != nil {
+			t.Fatalf("ExpandCIDR(%q) returned error: %v", tc.cidr, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("ExpandCIDR(%q) = %v, want %v", tc.cidr, got, tc.want)
+		}
 	}
 }
 
