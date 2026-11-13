@@ -319,7 +319,6 @@ func (s *smuxSession) OpenStream(ctx context.Context, host string, port uint16) 
 		return nil, err
 	}
 
-	// Verify worker liveness within 5s so blackholed sessions do not remain active.
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 	poll := time.NewTicker(50 * time.Millisecond)
@@ -539,7 +538,7 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 	}
 
 	var req [4]byte
-	if _, err := io.ReadFull(client, req[:]); err != nil || req[0] != 0x05 || req[1] != 0x01 || req[2] != 0x00 {
+	if _, err := io.ReadFull(client, req[:]); err != nil || req[0] != 0x05 || req[1] != 0x01 {
 		_, _ = client.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
@@ -597,8 +596,6 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 	telemetry.ActiveStreams.Add(1)
 	defer telemetry.ActiveStreams.Add(^uint64(0))
 
-	stopClose := make(chan struct{})
-	defer close(stopClose)
 	ctx, cancel2 := context.WithCancel(parentCtx)
 	defer cancel2()
 	go func() {
@@ -606,7 +603,7 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 		case <-ctx.Done():
 			_ = stream.Close()
 			_ = client.Close()
-		case <-stopClose:
+		case <-time.After(0):
 		}
 	}()
 
