@@ -22,7 +22,7 @@
       "fragmentation_delay_ms": 2,
       "jitter_ms": 2,
       "allow_insecure_certs": false,
-      "ech_enabled": false,
+      "ech_enabled": true,
       "default_ws_path": "/secret-knock-99"
     },
     "warm_pool": {
