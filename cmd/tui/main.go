@@ -32,6 +32,7 @@ const (
 	modalInject
 	modalScan
 	modalHelp
+	modalDoctor
 )
 
 type Model struct {
@@ -65,6 +66,10 @@ type Model struct {
 	inputSpoof string
 	inputSNI   string
 	inputCIDR  string
+
+	doctorChecks []HealthCheck
+	doctorErr    string
+	doctorAt     time.Time
 }
 
 func initialModel(sockPath string) Model {
@@ -94,9 +99,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.frameIdx++
 		m.pollMod = (m.pollMod + 1) % 2
 		if m.pollMod == 0 {
-			return m, tea.Batch(tickCmd(), fetchStatusCmd(m.sockPath))
+			cmds := []tea.Cmd{tickCmd(), fetchStatusCmd(m.sockPath)}
+			if m.modal == modalDoctor {
+				cmds = append(cmds, fetchDoctorCmd(m.sockPath))
+			}
+			return m, tea.Batch(cmds...)
 		}
 		return m, tickCmd()
+
+	case doctorMsg:
+		if msg.err != nil {
+			m.doctorErr = msg.err.Error()
+			m.doctorChecks = nil
+		} else {
+			m.doctorErr = ""
+			m.doctorChecks = msg.checks
+			m.doctorAt = msg.at
+		}
+		return m, nil
 
 	case statusMsg:
 		if msg.err != nil {
@@ -153,7 +173,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, fetchStatusCmd(m.sockPath)
 
 	case tea.KeyPressMsg:
-		if m.modal == modalHelp {
+		if m.modal == modalHelp || m.modal == modalDoctor {
 			m.modal = modalNone
 			return m, nil
 		}
@@ -171,6 +191,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "?":
 			m.modal = modalHelp
 			return m, nil
+
+		case "d":
+			m.modal = modalDoctor
+			m.doctorChecks = nil
+			m.doctorErr = ""
+			return m, fetchDoctorCmd(m.sockPath)
 
 		case "m":
 			m.themeIdx = (m.themeIdx + 1) % len(themes)
@@ -594,7 +620,7 @@ func (m Model) renderRouteTable(innerW int, th Theme) []string {
 	sNorm := lipgloss.NewStyle().Foreground(th.Text)
 	sAlt := lipgloss.NewStyle().Foreground(th.Text).Background(th.RowAlt)
 
-	header := sHdr.Render(" ST  EDGE IP          DIR       STEALTH         RTT     SCORE")
+	header := sHdr.Render(" ST  EDGE IP          DIR       STEALTH         RTT     WS  SCORE")
 	lines := []string{header}
 
 	maxRows := 5
@@ -625,14 +651,19 @@ func (m Model) renderRouteTable(innerW int, th Theme) []string {
 		if r.TLSHandshakeMs <= 0 {
 			rttStr = "  -  "
 		}
+		wsStr := " – "
+		if r.WSVerified {
+			wsStr = " ✓ "
+		}
 		scoreStr := renderScoreBar(r.Score, th)
 
-		rowRaw := fmt.Sprintf(" %s%-15s  %-8s  %-14s  %-5s  %s",
+		rowRaw := fmt.Sprintf(" %s%-15s  %-8s  %-14s  %-5s  %s %s",
 			marker,
 			truncateText(r.TargetIP, 15),
 			truncateText(dir, 8),
 			truncateText(r.StealthMode, 14),
 			rttStr,
+			wsStr,
 			scoreStr,
 		)
 
@@ -708,12 +739,26 @@ func (m Model) renderFooter(w int, th Theme, sKey, sLabel, badgeWarn, badgeCrit 
 		Padding(0, 1).
 		Width(w - 2)
 
+	if m.modal == modalDoctor {
+		var bodyLines []string
+		title := lipgloss.NewStyle().Bold(true).Foreground(th.Accent).Render("DOCTOR // LIVE HEALTH CHECKS")
+		bodyLines = append(bodyLines, title)
+		if m.doctorErr != "" {
+			bodyLines = append(bodyLines, lipgloss.NewStyle().Bold(true).Foreground(th.Crit).Render("  Doctor check failed: "+truncateText(m.doctorErr, 60)))
+		} else {
+			bodyLines = append(bodyLines, renderDoctorLines(m.doctorChecks, m.snap, w-6)...)
+		}
+		bodyLines = append(bodyLines, sLabel.Render("  Press any key to close — checks refresh while open."))
+		return modalBox.Render(strings.Join(bodyLines, "\n"))
+	}
+
 	if m.modal == modalHelp {
 		helpBody := strings.Join([]string{
 			lipgloss.NewStyle().Bold(true).Foreground(th.Accent).Render("CORNELIUS TACTICAL HUD // KEYBINDINGS"),
 			fmt.Sprintf("  %s Navigate routes    %s Hot-swap selected IP    %s Manual route inject", sKey.Render("[j/k]"), sKey.Render("[Enter]"), sKey.Render("[i]")),
 			fmt.Sprintf("  %s Cycle stealth mode %s Flip SNISPF direction   %s Toggle XDP Lockdown", sKey.Render("[e]"), sKey.Render("[f]"), sKey.Render("[l]")),
 			fmt.Sprintf("  %s DPI hop radar      %s Scan CIDR subnet        %s Cycle color palette", sKey.Render("[t]"), sKey.Render("[s]"), sKey.Render("[m]")),
+			fmt.Sprintf("  %s Doctor health      %s Refresh status", sKey.Render("[d]"), sKey.Render("[r]")),
 			sLabel.Render("  Press any key to close this overlay..."),
 		}, "\n")
 		return modalBox.Render(helpBody)
@@ -768,13 +813,14 @@ func (m Model) renderFooter(w int, th Theme, sKey, sLabel, badgeWarn, badgeCrit 
 		statusNote = badgeCrit.Render(truncateText(m.lastErr, 34))
 	}
 
-	return fmt.Sprintf(" %s Stealth  %s Dir  %s XDP  %s Echo  %s Scan  %s Inject  %s Theme  %s Help  %s Quit  %s",
+	return fmt.Sprintf(" %s Stealth  %s Dir  %s XDP  %s Echo  %s Scan  %s Inject  %s Doctor  %s Theme  %s Help  %s Quit  %s",
 		sKey.Render("[e]"),
 		sKey.Render("[f]"),
 		sKey.Render("[l]"),
 		sKey.Render("[t]"),
 		sKey.Render("[s]"),
 		sKey.Render("[i]"),
+		sKey.Render("[d]"),
 		sKey.Render("[m]"),
 		sKey.Render("[?]"),
 		sKey.Render("[q]"),

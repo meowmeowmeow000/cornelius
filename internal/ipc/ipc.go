@@ -15,6 +15,7 @@ import (
 
 	"cornelius/internal/bpf"
 	"cornelius/internal/config"
+	"cornelius/internal/proxy"
 	"cornelius/internal/proxy/factory"
 	"cornelius/internal/proxy/pool"
 	"cornelius/internal/scanner"
@@ -41,6 +42,7 @@ type IPCResponse struct {
 	Status   string                   `json:"status"`
 	Message  string                   `json:"message,omitempty"`
 	Snapshot *telemetry.VitalSnapshot `json:"snapshot,omitempty"`
+	Checks   []proxy.HealthCheck      `json:"checks,omitempty"`
 }
 
 func StartControlPlane(ctx context.Context, warmPool *pool.WarmPool) {
@@ -293,6 +295,28 @@ func handleIPCConn(conn net.Conn, warmPool *pool.WarmPool) {
 		}(targets, worker, spoof, active.WSPath)
 
 		_ = json.NewEncoder(conn).Encode(IPCResponse{Status: "ok", Message: "scanner started"})
+
+	case "doctor":
+		// Cheap checks only: profile validation plus live counters. The
+		// full live tunnel test stays in the `cornelius doctor` CLI — it
+		// dials the network and must not run on every TUI poll.
+		var checks []proxy.HealthCheck
+		if prof := warmPool.Profile(); prof != nil {
+			checks = append(checks, proxy.CheckProfileHealth(prof)...)
+		} else {
+			checks = append(checks, proxy.HealthCheck{Name: "profile is loaded", Status: "fail", Detail: "the daemon has no profile to check"})
+		}
+		if pipes := telemetry.PoolHealthyPipes.Load(); pipes > 0 {
+			checks = append(checks, proxy.HealthCheck{Name: "warm tunnels ready", Status: "ok", Detail: fmt.Sprintf("%d warm pipe(s) in the pool", pipes)})
+		} else {
+			checks = append(checks, proxy.HealthCheck{Name: "warm tunnels ready", Status: "warn", Detail: "no warm pipes — dials will be cold until the pool replenishes"})
+		}
+		if fails := telemetry.DialFailures.Load(); fails > 0 {
+			checks = append(checks, proxy.HealthCheck{Name: "dial failures since start", Status: "warn", Detail: fmt.Sprintf("%d failed dial(s)", fails)})
+		} else {
+			checks = append(checks, proxy.HealthCheck{Name: "dial failures since start", Status: "ok", Detail: "none"})
+		}
+		_ = json.NewEncoder(conn).Encode(IPCResponse{Status: "ok", Checks: checks})
 
 	case "status":
 		active := warmPool.ActiveRoute()

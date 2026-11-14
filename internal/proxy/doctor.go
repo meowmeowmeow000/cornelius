@@ -23,77 +23,78 @@ import (
 // making the user read logs or guess: it validates the profile, dials the
 // real tunnel, and pushes one real stream through it end to end.
 
-type checkStatus string
-
-const (
-	statusOK   checkStatus = "ok"
-	statusWarn checkStatus = "warn"
-	statusFail checkStatus = "fail"
-)
-
-type doctorCheck struct {
-	name   string
-	status checkStatus
-	detail string
+// HealthCheck is one plain-language verdict about the daemon's health.
+// It is shared by the `cornelius doctor` CLI output and the TUI doctor
+// panel (via IPC), so both tell the same truth in the same words.
+type HealthCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // "ok", "warn" or "fail"
+	Detail string `json:"detail,omitempty"`
 }
 
-func (c doctorCheck) String() string {
+func (c HealthCheck) String() string {
 	mark := "[ok]"
-	switch c.status {
-	case statusWarn:
+	switch c.Status {
+	case "warn":
 		mark = "[!!]"
-	case statusFail:
+	case "fail":
 		mark = "[xx]"
 	}
-	if c.detail == "" {
-		return fmt.Sprintf("%s %s", mark, c.name)
+	if c.Detail == "" {
+		return fmt.Sprintf("%s %s", mark, c.Name)
 	}
-	return fmt.Sprintf("%s %s — %s", mark, c.name, c.detail)
+	return fmt.Sprintf("%s %s — %s", mark, c.Name, c.Detail)
 }
 
-// validateProfile checks the loaded profile for the misconfigurations that
-// have actually broken Cornelius before. Pure function, unit-tested.
-func validateProfile(p *config.CombatProfile) []doctorCheck {
-	var out []doctorCheck
+// CheckProfileHealth checks the loaded profile for the misconfigurations
+// that have actually broken Cornelius before. Pure function, unit-tested.
+func CheckProfileHealth(p *config.CombatProfile) []HealthCheck {
+	var out []HealthCheck
 	sf := p.Modules.StealthFactory
 
 	if p.WorkerHost == "" {
-		out = append(out, doctorCheck{"worker host is set", statusFail, "worker_host is empty; the daemon has nowhere to dial"})
+		out = append(out, HealthCheck{"worker host is set", "fail", "worker_host is empty; the daemon has nowhere to dial"})
 	} else {
-		out = append(out, doctorCheck{"worker host is set", statusOK, p.WorkerHost})
+		out = append(out, HealthCheck{"worker host is set", "ok", p.WorkerHost})
 	}
 
 	switch {
 	case sf.DefaultWSPath == "":
-		out = append(out, doctorCheck{"WebSocket path is configured", statusFail, "default_ws_path is empty, so the daemon skips the WebSocket upgrade and sends raw SMUX at Cloudflare's HTTPS port (EOF)"})
+		out = append(out, HealthCheck{"WebSocket path is configured", "fail", "default_ws_path is empty, so the daemon skips the WebSocket upgrade and sends raw SMUX at Cloudflare's HTTPS port (EOF)"})
 	case sf.DefaultWSPath == "/":
-		out = append(out, doctorCheck{"WebSocket path is configured", statusFail, "default_ws_path is \"/\" — the secret path is missing, the upgrade goes to the wrong path"})
+		out = append(out, HealthCheck{"WebSocket path is configured", "fail", "default_ws_path is \"/\" — the secret path is missing, the upgrade goes to the wrong path"})
 	default:
-		out = append(out, doctorCheck{"WebSocket path is configured", statusOK, sf.DefaultWSPath})
+		out = append(out, HealthCheck{"WebSocket path is configured", "ok", sf.DefaultWSPath})
 	}
 
 	switch sf.SNISPFDirection {
 	case config.SNISPFDirectionLegacy:
-		out = append(out, doctorCheck{"SNI direction is legacy", statusOK, "outer SNI matches the Worker host"})
+		out = append(out, HealthCheck{"SNI direction is legacy", "ok", "outer SNI matches the Worker host"})
 	case config.SNISPFDirectionFronting:
-		out = append(out, doctorCheck{"SNI direction is legacy", statusWarn, "direction is fronting — Cloudflare blocks SNI/Host mismatches with 403"})
+		out = append(out, HealthCheck{"SNI direction is legacy", "warn", "direction is fronting — Cloudflare blocks SNI/Host mismatches with 403"})
 	case "":
-		out = append(out, doctorCheck{"SNI direction is legacy", statusWarn, "direction is unset; routes fall back to legacy only when no spoof SNI is set"})
+		out = append(out, HealthCheck{"SNI direction is legacy", "warn", "direction is unset; routes fall back to legacy only when no spoof SNI is set"})
 	default:
-		out = append(out, doctorCheck{"SNI direction is legacy", statusFail, "unknown direction " + sf.SNISPFDirection})
+		out = append(out, HealthCheck{"SNI direction is legacy", "fail", "unknown direction " + sf.SNISPFDirection})
+	}
+
+	if sf.ECHEnabled {
+		out = append(out, HealthCheck{"ECH encrypts the SNI", "ok", "the ClientHello hides the Worker hostname"})
+	} else {
+		out = append(out, HealthCheck{"ECH encrypts the SNI", "warn", "off — the SNI is visible; randomized fragmentation is the active defence"})
 	}
 
 	route := p.PrimaryRoute
 	if route.TargetIP == "" {
-		out = append(out, doctorCheck{"primary route has a target", statusFail, "no target_ip — nothing to dial"})
+		out = append(out, HealthCheck{"primary route has a target", "fail", "no target_ip — nothing to dial"})
 	} else {
-		out = append(out, doctorCheck{"primary route has a target", statusOK, fmt.Sprintf("%s:%d (%s)", route.TargetIP, route.TargetPort, route.StealthMode)})
+		out = append(out, HealthCheck{"primary route has a target", "ok", fmt.Sprintf("%s:%d (%s)", route.TargetIP, route.TargetPort, route.StealthMode)})
 	}
 	if route.WSPath != "" && sf.DefaultWSPath != "" && route.WSPath != sf.DefaultWSPath {
-		out = append(out, doctorCheck{"route and profile agree on the WebSocket path", statusWarn, fmt.Sprintf("route says %q, profile default says %q", route.WSPath, sf.DefaultWSPath)})
+		out = append(out, HealthCheck{"route and profile agree on the WebSocket path", "warn", fmt.Sprintf("route says %q, profile default says %q", route.WSPath, sf.DefaultWSPath)})
 	}
 	if route.CleanSNI == "" {
-		out = append(out, doctorCheck{"route knows the Worker host", statusFail, "clean_sni is empty"})
+		out = append(out, HealthCheck{"route knows the Worker host", "fail", "clean_sni is empty"})
 	}
 	return out
 }
@@ -101,7 +102,7 @@ func validateProfile(p *config.CombatProfile) []doctorCheck {
 // checkProfileAgreement warns when the two profile files in the repo
 // disagree, so the user cannot run one by accident and get the other's bugs.
 // It looks for combat.profile next to the profile's directory.
-func checkProfileAgreement(profilePath string, p *config.CombatProfile) []doctorCheck {
+func checkProfileAgreement(profilePath string, p *config.CombatProfile) []HealthCheck {
 	sibling := filepath.Clean(filepath.Join(filepath.Dir(profilePath), "..", "combat.profile"))
 	if filepath.Clean(profilePath) == sibling {
 		return nil
@@ -110,13 +111,13 @@ func checkProfileAgreement(profilePath string, p *config.CombatProfile) []doctor
 	if err != nil {
 		return nil // no second profile to disagree with
 	}
-	var out []doctorCheck
+	var out []HealthCheck
 	a, b := p.Modules.StealthFactory, other.Modules.StealthFactory
 	if a.SNISPFDirection != b.SNISPFDirection {
-		out = append(out, doctorCheck{"profiles agree on SNI direction", statusWarn, fmt.Sprintf("%s says %q, %s says %q", profilePath, a.SNISPFDirection, sibling, b.SNISPFDirection)})
+		out = append(out, HealthCheck{"profiles agree on SNI direction", "warn", fmt.Sprintf("%s says %q, %s says %q", profilePath, a.SNISPFDirection, sibling, b.SNISPFDirection)})
 	}
 	if a.DefaultWSPath != b.DefaultWSPath {
-		out = append(out, doctorCheck{"profiles agree on the WebSocket path", statusWarn, fmt.Sprintf("%s says %q, %s says %q", profilePath, a.DefaultWSPath, sibling, b.DefaultWSPath)})
+		out = append(out, HealthCheck{"profiles agree on the WebSocket path", "warn", fmt.Sprintf("%s says %q, %s says %q", profilePath, a.DefaultWSPath, sibling, b.DefaultWSPath)})
 	}
 	return out
 }
@@ -124,14 +125,14 @@ func checkProfileAgreement(profilePath string, p *config.CombatProfile) []doctor
 // checkWorkerDirectly dials the Worker by hostname (normal DNS) and asks for
 // the WebSocket upgrade, bypassing the profile's edge IP. It distinguishes
 // "the Worker is dead" from "this edge IP is stale or blocked from here".
-func checkWorkerDirectly(ctx context.Context, workerHost, wsPath string) doctorCheck {
+func checkWorkerDirectly(ctx context.Context, workerHost, wsPath string) HealthCheck {
 	d := &net.Dialer{Timeout: 10 * time.Second}
 	conn, err := tls.DialWithDialer(d, "tcp", net.JoinHostPort(workerHost, "443"), &tls.Config{
 		ServerName: workerHost,
 		NextProtos: []string{"http/1.1"},
 	})
 	if err != nil {
-		return doctorCheck{"Worker answers directly (by hostname)", statusFail, "TLS to " + workerHost + " failed: " + err.Error()}
+		return HealthCheck{"Worker answers directly (by hostname)", "fail", "TLS to " + workerHost + " failed: " + err.Error()}
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
@@ -141,16 +142,16 @@ func checkWorkerDirectly(ctx context.Context, workerHost, wsPath string) doctorC
 	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
 		wsPath, workerHost, base64.StdEncoding.EncodeToString(keyBytes[:]))
 	if _, err := conn.Write([]byte(req)); err != nil {
-		return doctorCheck{"Worker answers directly (by hostname)", statusFail, "upgrade request failed: " + err.Error()}
+		return HealthCheck{"Worker answers directly (by hostname)", "fail", "upgrade request failed: " + err.Error()}
 	}
 	status, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
-		return doctorCheck{"Worker answers directly (by hostname)", statusFail, "no response to the upgrade: " + err.Error()}
+		return HealthCheck{"Worker answers directly (by hostname)", "fail", "no response to the upgrade: " + err.Error()}
 	}
 	if strings.Contains(status, "101") {
-		return doctorCheck{"Worker answers directly (by hostname)", statusOK, "WebSocket upgrade at " + wsPath + " returned 101"}
+		return HealthCheck{"Worker answers directly (by hostname)", "ok", "WebSocket upgrade at " + wsPath + " returned 101"}
 	}
-	return doctorCheck{"Worker answers directly (by hostname)", statusFail, "upgrade returned: " + strings.TrimSpace(status)}
+	return HealthCheck{"Worker answers directly (by hostname)", "fail", "upgrade returned: " + strings.TrimSpace(status)}
 }
 
 // proxyEnvSet reports whether this machine routes traffic through a proxy.
@@ -171,20 +172,20 @@ func proxyEnvSet() bool {
 // process exit code: 0 when everything is healthy, 1 when anything failed.
 // Warnings do not fail the run — they are things to fix before they bite.
 func RunDoctor(ctx context.Context, profilePath, iface string) int {
-	printCheck := func(c doctorCheck) { fmt.Println(c.String()) }
+	printCheck := func(c HealthCheck) { fmt.Println(c.String()) }
 
 	profile, err := config.LoadCombatProfile(profilePath)
 	if err != nil {
-		printCheck(doctorCheck{"profile loads", statusFail, err.Error()})
+		printCheck(HealthCheck{"profile loads", "fail", err.Error()})
 		fmt.Println("\nDoctor: FAILED — fix the profile and run again.")
 		return 1
 	}
-	printCheck(doctorCheck{"profile loads", statusOK, profilePath})
+	printCheck(HealthCheck{"profile loads", "ok", profilePath})
 
 	failed := false
-	for _, c := range validateProfile(profile) {
+	for _, c := range CheckProfileHealth(profile) {
 		printCheck(c)
-		if c.status == statusFail {
+		if c.Status == "fail" {
 			failed = true
 		}
 	}
@@ -200,7 +201,7 @@ func RunDoctor(ctx context.Context, profilePath, iface string) int {
 	// proxied machines: the daemon dials directly, and a proxy in the middle
 	// answers the dial itself, so the test would fail for the wrong reason.
 	if proxyEnvSet() {
-		printCheck(doctorCheck{"live tunnel test", statusWarn, "skipped — this machine routes traffic through a proxy, so direct dials cannot be trusted here; run doctor on your own machine to test the tunnel"})
+		printCheck(HealthCheck{"live tunnel test", "warn", "skipped — this machine routes traffic through a proxy, so direct dials cannot be trusted here; run doctor on your own machine to test the tunnel"})
 		fmt.Println("\nDoctor: profile is healthy; the live tunnel test was skipped here.")
 		return 0
 	}
@@ -216,20 +217,20 @@ func RunDoctor(ctx context.Context, profilePath, iface string) int {
 		WSPath:      sf.DefaultWSPath,
 	})
 	if err != nil {
-		printCheck(doctorCheck{"tunnel dials and upgrades", statusFail, err.Error()})
+		printCheck(HealthCheck{"tunnel dials and upgrades", "fail", err.Error()})
 		direct := checkWorkerDirectly(dialCtx, profile.WorkerHost, sf.DefaultWSPath)
 		printCheck(direct)
-		if direct.status == statusOK {
+		if direct.Status == "ok" {
 			fmt.Println("\nDoctor: FAILED — the tunnel to the profile's edge IP is down, but the Worker itself is alive. The edge IP is probably stale (re-scan for fresh edges) or blocked from this network.")
 		} else {
 			fmt.Println("\nDoctor: FAILED — the tunnel itself is down. Check the Worker deployment and the route.")
-			if strings.Contains(err.Error(), "first record does not look like a TLS handshake") && strings.Contains(direct.detail, "first record does not look like a TLS handshake") {
+			if strings.Contains(err.Error(), "first record does not look like a TLS handshake") && strings.Contains(direct.Detail, "first record does not look like a TLS handshake") {
 				fmt.Println("Note: the edge IP and the hostname fail in exactly the same way — that usually means this network intercepts TLS (a proxy or middlebox), not that the Worker is down. Run doctor on your own machine to be sure.")
 			}
 		}
 		return 1
 	}
-	printCheck(doctorCheck{"tunnel dials and upgrades", statusOK, fmt.Sprintf("TLS + WebSocket upgrade to %s", profile.PrimaryRoute.TargetIP)})
+	printCheck(HealthCheck{"tunnel dials and upgrades", "ok", fmt.Sprintf("TLS + WebSocket upgrade to %s", profile.PrimaryRoute.TargetIP)})
 	defer conn.Close()
 
 	sess := newSmuxSession(conn)
@@ -238,7 +239,7 @@ func RunDoctor(ctx context.Context, profilePath, iface string) int {
 	defer streamCancel()
 	st, err := sess.OpenStream(streamCtx, "example.com", 80)
 	if err != nil {
-		printCheck(doctorCheck{"a real stream works end to end", statusFail, "could not open a stream: " + err.Error()})
+		printCheck(HealthCheck{"a real stream works end to end", "fail", "could not open a stream: " + err.Error()})
 		fmt.Println("\nDoctor: FAILED — the tunnel is up but streams do not work. Check the Worker's SMUX handling.")
 		return 1
 	}
@@ -267,27 +268,27 @@ func RunDoctor(ctx context.Context, profilePath, iface string) int {
 		if readErr != nil {
 			detail = readErr.Error()
 		}
-		printCheck(doctorCheck{"a real stream works end to end", statusFail, detail})
+		printCheck(HealthCheck{"a real stream works end to end", "fail", detail})
 		fmt.Println("\nDoctor: FAILED — the tunnel is up but streams do not work. Check the Worker's SMUX handling.")
 		return 1
 	}
-	printCheck(doctorCheck{"a real stream works end to end", statusOK, "fetched example.com through the tunnel, got " + strings.TrimSpace(strings.SplitN(string(buf[:n]), "\r\n", 2)[0])})
+	printCheck(HealthCheck{"a real stream works end to end", "ok", "fetched example.com through the tunnel, got " + strings.TrimSpace(strings.SplitN(string(buf[:n]), "\r\n", 2)[0])})
 
 	// XDP shield: only tested when an interface is given, because attaching
 	// needs root and a real interface.
 	if iface != "" {
 		if os.Geteuid() != 0 {
-			printCheck(doctorCheck{"XDP shield attaches", statusWarn, "not running as root; attaching the XDP shield will likely fail"})
+			printCheck(HealthCheck{"XDP shield attaches", "warn", "not running as root; attaching the XDP shield will likely fail"})
 		} else if err := bpf.AttachXDP(iface); err != nil {
-			printCheck(doctorCheck{"XDP shield attaches", statusFail, err.Error()})
+			printCheck(HealthCheck{"XDP shield attaches", "fail", err.Error()})
 			fmt.Println("\nDoctor: FAILED — the tunnel works, but the XDP shield does not attach.")
 			return 1
 		} else {
-			printCheck(doctorCheck{"XDP shield attaches", statusOK, iface})
+			printCheck(HealthCheck{"XDP shield attaches", "ok", iface})
 			bpf.CloseXDP()
 		}
 	} else {
-		printCheck(doctorCheck{"XDP shield", statusWarn, "not tested — pass -i <interface> (as root) to test the shield too"})
+		printCheck(HealthCheck{"XDP shield", "warn", "not tested — pass -i <interface> (as root) to test the shield too"})
 	}
 
 	fmt.Println("\nDoctor: all green — the tunnel works end to end.")

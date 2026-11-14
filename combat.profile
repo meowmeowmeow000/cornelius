@@ -22,7 +22,8 @@
       "fallback_mode": "tls_micro_frag",
       "fragmentation_delay_ms": 2,
       "jitter_ms": 2,
-      "allow_insecure_certs": false
+      "allow_insecure_certs": false,
+      "ech_enabled": false,
     },
     "warm_pool": {
       "target_capacity": 3,
