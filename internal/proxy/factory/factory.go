@@ -16,6 +16,7 @@ import (
 
 	"cornelius/internal/config"
 	"cornelius/internal/netraw"
+	"cornelius/internal/telemetry"
 	"cornelius/internal/tlshandshake"
 )
 
@@ -38,6 +39,10 @@ func ResolveFingerprint(fp string) utls.ClientHelloID {
 		return utls.HelloEdge_Auto
 	case "randomized":
 		return utls.HelloRandomized
+	case "chrome_131":
+		return utls.HelloChrome_131
+	case "chrome_133":
+		return utls.HelloChrome_133
 	default:
 		return utls.HelloChrome_Auto
 	}
@@ -75,15 +80,69 @@ type StealthDialConfig struct {
 	JitterMs    int
 	AllowInsec  bool
 	WSPath      string
+	// ECHEnabled turns on Encrypted ClientHello when the Worker host
+	// publishes an ECH config. Fetch failure or a server rejection falls
+	// back to dialing without ECH — never a failed dial.
+	ECHEnabled bool
+	// ECHRejectionVerify, if set, verifies a server that rejects ECH (the
+	// outer certificate, for the ECH public name). Nil means the default:
+	// verify against the system roots, ignoring InsecureSkipVerify — that
+	// is the point, a middlebox that strips ECH must not silently
+	// downgrade the connection. The dialer retries without ECH only after
+	// this verification passes; a failed verification aborts the dial.
+	ECHRejectionVerify func(utls.ConnectionState) error
 }
 
 func DialStealthTunnel(ctx context.Context, cfg StealthDialConfig) (net.Conn, error) {
+	var echList []byte
+	var echPublic string
+	if cfg.ECHEnabled && cfg.Route.CleanSNI != "" {
+		list, err := FetchECHConfigList(ctx, cfg.Route.CleanSNI)
+		if err != nil {
+			telemetry.Log.Warn("ECH config fetch failed, dialing without ECH", "host", cfg.Route.CleanSNI, "err", err.Error())
+		} else {
+			echList = list
+			echPublic, _ = ECHPublicName(list)
+		}
+	}
+
+	conn, err := dialOnce(ctx, cfg, echList, echPublic)
+	if err == nil {
+		return conn, nil
+	}
+	if echList != nil && isECHRejection(err) {
+		// The server rejected ECH: retry once without it. The next dial
+		// re-fetches fresh configs from DoH, so a retry-config update is
+		// picked up then instead of being chased here.
+		telemetry.Log.Warn("Server rejected ECH, retrying without it", "host", cfg.Route.CleanSNI)
+		return dialOnce(ctx, cfg, nil, "")
+	}
+	return nil, err
+}
+
+func dialOnce(ctx context.Context, cfg StealthDialConfig, echList []byte, echPublic string) (net.Conn, error) {
 	port := cfg.Route.TargetPort
 	if port == 0 {
 		port = 443
 	}
 
 	dir, outerSNI, innerHost := ResolveSNIDirection(cfg.Route)
+
+	// With ECH, the outer SNI is the ECH public name (from the config) and
+	// the inner SNI — the one the certificate is verified against — is the
+	// Worker host. Fronting is meaningless then: the config fixes the
+	// outer name, so force legacy.
+	serverName := outerSNI
+	fragSNI := outerSNI
+	if echList != nil {
+		dir = config.SNISPFDirectionLegacy
+		serverName = innerHost
+		if echPublic != "" {
+			fragSNI = echPublic
+		} else {
+			fragSNI = innerHost
+		}
+	}
 
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	network := "tcp4"
@@ -109,7 +168,7 @@ func DialStealthTunnel(ctx context.Context, cfg StealthDialConfig) (net.Conn, er
 
 	wrapped := &fragmentingConn{
 		Conn:        rawConn,
-		sni:         outerSNI,
+		sni:         fragSNI,
 		decoySNI:    decoySNI,
 		decoyTTL:    cfg.Route.DecoyTTL,
 		mode:        cfg.Route.StealthMode,
@@ -119,14 +178,18 @@ func DialStealthTunnel(ctx context.Context, cfg StealthDialConfig) (net.Conn, er
 	}
 
 	tlsCfg := &utls.Config{
-		ServerName: outerSNI,
+		ServerName: serverName,
 		// Force HTTP/1.1 ALPN: the Chrome fingerprint advertises h2, but the
 		// WebSocket upgrade below is a raw HTTP/1.1 request. Negotiating h2
 		// makes Cloudflare reject the upgrade (200 OK / EOF).
-		NextProtos:         []string{"http/1.1"},
-		InsecureSkipVerify: cfg.AllowInsec,
+		NextProtos:                     []string{"http/1.1"},
+		InsecureSkipVerify:             cfg.AllowInsec,
+		EncryptedClientHelloConfigList: echList,
 	}
-	uConn := utls.UClient(wrapped, tlsCfg, ResolveFingerprint(cfg.Route.Fingerprint))
+	if cfg.ECHRejectionVerify != nil {
+		tlsCfg.EncryptedClientHelloRejectionVerify = cfg.ECHRejectionVerify
+	}
+	uConn := utls.UClient(wrapped, tlsCfg, PickFingerprint(cfg.Route.Fingerprint))
 	if err := uConn.HandshakeContext(ctx); err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("uTLS handshake failed (dir=%s outer=%s): %w", dir, outerSNI, err)

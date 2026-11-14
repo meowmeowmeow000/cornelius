@@ -49,6 +49,28 @@ skips the live test instead of reporting a false failure.
   edges that prove the full path — TLS handshake *plus* WebSocket upgrade
   *plus* a SMUX keepalive echo. A fast edge that cannot upgrade never
   becomes primary.
+- **Encrypted ClientHello** (`internal/proxy/factory`, `ech_enabled` in the
+  profile): the dialer fetches the Worker's ECH config from its DNS HTTPS
+  record over DoH and hides the SNI entirely — the outer hello carries
+  only the public name (`cloudflare-ech.com`), the real Worker hostname
+  travels encrypted inside. Fragmentation hides the SNI from a DPI that
+  reads one packet at a time; ECH hides it from one that reassembles.
+  Safe by construction: a failed fetch, or a server that rejects ECH,
+  falls back to fragmentation without ECH — and a rejection is only
+  trusted after the outer certificate verifies, so a middlebox stripping
+  ECH cannot silently downgrade the connection. Needs uTLS ≥ 1.8.2
+  (v1.6.7 only had the parser and a GREASE extension that could not be
+  configured for real ECH).
+- **Fingerprint depth** (`internal/proxy/factory`): the Chrome hello is
+  already deep in uTLS 1.8.2 — extension order is shuffled on every
+  handshake the way BoringSSL does it, a GREASE ECH extension is sent
+  when no real ECH config is offered, and the key shares include the
+  post-quantum X25519MLKEM768 group. Tests lock all three in so a future
+  uTLS upgrade cannot silently drop them. On top of that, the dialer
+  rotates between Chrome 131 and 133 per connection when the route asks
+  for the default fingerprint (an explicit pin — `chrome_131`,
+  `chrome_133`, `firefox_auto`, `ios_auto`, `edge_auto`, `randomized` —
+  is always honoured exactly).
 - **ECH** is the next step: uTLS already supports `ECHConfigs`, so the
   daemon could hide the SNI entirely instead of fragmenting around it.
   It needs the Worker's ECH config fetched over DoH first, with a clean
