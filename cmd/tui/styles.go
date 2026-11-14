@@ -29,7 +29,7 @@ func renderPanel(title, rightTag string, lines []string, width int, borderColor,
 
 	topBorder := bStyle.Render("╭─[ ") + tStyle.Render(title) + bStyle.Render(" ]"+strings.Repeat("─", fillLen))
 	if rightTag != "" {
-		topBorder += bStyle.Render("[ "+rightTag+" ]─")
+		topBorder += bStyle.Render("[ " + rightTag + " ]─")
 	}
 	topBorder += bStyle.Render("╮")
 

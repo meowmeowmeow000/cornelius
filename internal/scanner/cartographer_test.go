@@ -51,4 +51,3 @@ func TestExpandCIDRHandlesSingleAddressRanges(t *testing.T) {
 		}
 	}
 }
-

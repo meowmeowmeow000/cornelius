@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -36,7 +37,35 @@ func (w *wsConn) WriteBinary(payload []byte) error {
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()
 
-	if _, err := w.raw.Write(payload); err != nil {
+	// RFC 6455: frames sent by a client MUST be masked, and the peer parses
+	// standard WebSocket frames (see ReadMessage). The SMUX payload therefore
+	// travels inside a binary frame. Writing raw bytes here used to be a
+	// protocol error: a spec-compliant server reads the first SMUX byte as a
+	// frame header and the connection dies.
+	var mask [4]byte
+	if _, err := rand.Read(mask[:]); err != nil {
+		return err
+	}
+	frame := make([]byte, 0, len(payload)+14)
+	frame = append(frame, 0x82) // FIN + binary opcode
+	switch {
+	case len(payload) <= 125:
+		frame = append(frame, 0x80|byte(len(payload)))
+	case len(payload) <= 65535:
+		frame = append(frame, 0x80|126, byte(len(payload)>>8), byte(len(payload)))
+	default:
+		frame = append(frame, 0x80|127)
+		var lb [8]byte
+		binary.BigEndian.PutUint64(lb[:], uint64(len(payload)))
+		frame = append(frame, lb[:]...)
+	}
+	frame = append(frame, mask[:]...)
+	masked := make([]byte, len(payload))
+	for i := range payload {
+		masked[i] = payload[i] ^ mask[i&3]
+	}
+	frame = append(frame, masked...)
+	if _, err := w.raw.Write(frame); err != nil {
 		return err
 	}
 	return nil

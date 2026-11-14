@@ -217,4 +217,3 @@ func (c *Cartographer) Run(ctx context.Context, targetIPs []string, workerHost s
 	}
 	return report
 }
-
