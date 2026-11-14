@@ -40,6 +40,25 @@ It prints plain-language checks (`[ok]`, `[!!]`, `[xx]`) and exits 0 when
 healthy. On a machine that forces traffic through a proxy it says so and
 skips the live test instead of reporting a false failure.
 
+The daemon runs the same profile checks at startup and refuses to
+start with a broken profile (bad WebSocket path, missing Worker host,
+no primary target), instead of starting a daemon whose every dial is
+doomed. Warnings (ECH off, fronting direction) are logged but never
+block startup. A profile file that fails to load at all still starts
+empty and waits for routes over IPC, as before.
+
+### Rebuilding the XDP program
+
+The compiled eBPF program (`internal/bpf/*.o`, embedded into the
+binary by `bpf2go`) is committed to the repo. If you change
+`xdp_filter.c`, regenerate it with `make ebpf` (needs `clang`,
+`llvm` and `libbpf-dev`) and commit the result — CI verifies the
+committed artifacts match the C source, and a test
+(`internal/bpf/loader_test.go`) fails loudly if the artifacts are
+ever empty again. The daemon also checks the embedded program at
+startup when `-i` is given and refuses to start with a clear error
+instead of a raw ELF failure.
+
 ## Advanced evasion
 
 - **Randomized fragmentation** (`internal/tlshandshake`): every connection
@@ -71,10 +90,6 @@ skips the live test instead of reporting a false failure.
   for the default fingerprint (an explicit pin — `chrome_131`,
   `chrome_133`, `firefox_auto`, `ios_auto`, `edge_auto`, `randomized` —
   is always honoured exactly).
-- **ECH** is the next step: uTLS already supports `ECHConfigs`, so the
-  daemon could hide the SNI entirely instead of fragmenting around it.
-  It needs the Worker's ECH config fetched over DoH first, with a clean
-  fallback to plain fragmentation when no config is available.
 
 ## Cloudflare Worker
 

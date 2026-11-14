@@ -46,7 +46,34 @@ type flowKeyV6 struct {
 	DstPort uint16
 }
 
+// ValidateEmbeddedProgram parses the embedded XDP program without
+// touching the kernel, so the daemon can fail fast on a broken build
+// instead of dying later at AttachXDP with a raw ELF error. It also
+// guards the regression where the committed .o artifacts are empty
+// (a fresh clone then has no shield at all).
+func ValidateEmbeddedProgram() error {
+	if len(_BpfBytes) == 0 {
+		return fmt.Errorf("embedded XDP program is empty (bpf_bpfel.o / bpf_bpfeb.o are 0 bytes) — regenerate it with `make ebpf` and commit the artifacts")
+	}
+	spec, err := loadBpf()
+	if err != nil {
+		return err
+	}
+	if spec.Programs["filter_dpi_rst"] == nil {
+		return fmt.Errorf("embedded XDP program has no 'filter_dpi_rst' program — regenerate it with `make ebpf`")
+	}
+	for _, name := range []string{"server_ttl_map", "server_ttl_v6_map", "rst_drop_counter", "xdp_config_map"} {
+		if spec.Maps[name] == nil {
+			return fmt.Errorf("embedded XDP program is missing map %q — regenerate it with `make ebpf`", name)
+		}
+	}
+	return nil
+}
+
 func AttachXDP(interfaceName string) error {
+	if err := ValidateEmbeddedProgram(); err != nil {
+		return fmt.Errorf("XDP program is unusable: %w", err)
+	}
 	iface, err := net.InterfaceByName(interfaceName)
 	if err != nil {
 		return fmt.Errorf("lookup network iface %q: %w", interfaceName, err)
