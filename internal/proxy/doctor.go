@@ -197,6 +197,23 @@ func RunDoctor(ctx context.Context, profilePath, iface string) int {
 		return 1
 	}
 
+	// ECH config check: when ECH is on, the Worker host must publish a
+	// config for the dialer to fetch. This runs even on proxied machines —
+	// the DoH fetch goes through the proxy like any other HTTPS request.
+	sf := profile.Modules.StealthFactory
+	if sf.ECHEnabled {
+		list, err := factory.FetchECHConfigList(ctx, profile.WorkerHost)
+		switch {
+		case err != nil:
+			printCheck(HealthCheck{"ECH config is published", "warn", "could not fetch it (" + err.Error() + ") — the dialer will fall back to fragmentation without ECH"})
+		case func() bool { _, err := factory.ECHPublicName(list); return err != nil }():
+			printCheck(HealthCheck{"ECH config is published", "warn", "fetched but unreadable — the dialer will fall back to fragmentation without ECH"})
+		default:
+			name, _ := factory.ECHPublicName(list)
+			printCheck(HealthCheck{"ECH config is published", "ok", fmt.Sprintf("public name %s (%d bytes)", name, len(list))})
+		}
+	}
+
 	// Tunnel + end-to-end stream test against the real Worker. Skipped on
 	// proxied machines: the daemon dials directly, and a proxy in the middle
 	// answers the dial itself, so the test would fail for the wrong reason.
@@ -208,13 +225,13 @@ func RunDoctor(ctx context.Context, profilePath, iface string) int {
 
 	dialCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	sf := profile.Modules.StealthFactory
 	conn, err := factory.DialStealthTunnel(dialCtx, factory.StealthDialConfig{
 		Route:       profile.PrimaryRoute,
 		FragDelayMs: sf.FragmentationDelayMs,
 		JitterMs:    sf.JitterMs,
 		AllowInsec:  sf.AllowInsecureCerts,
 		WSPath:      sf.DefaultWSPath,
+		ECHEnabled:  sf.ECHEnabled,
 	})
 	if err != nil {
 		printCheck(HealthCheck{"tunnel dials and upgrades", "fail", err.Error()})
