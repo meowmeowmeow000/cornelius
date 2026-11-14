@@ -273,7 +273,7 @@ func handleIPCConn(conn net.Conn, warmPool *pool.WarmPool) {
 		telemetry.SetBackgroundBusy(nil, &busyTrue)
 		telemetry.RecordEvent("SCAN", "info", fmt.Sprintf("Cartographer scanning %d targets...", len(targets)))
 
-		go func(ips []string, wHost, sHost string) {
+		go func(ips []string, wHost, sHost, wsPath string) {
 			defer func() {
 				busyFalse := false
 				telemetry.SetBackgroundBusy(nil, &busyFalse)
@@ -282,6 +282,7 @@ func handleIPCConn(conn net.Conn, warmPool *pool.WarmPool) {
 			defer cancel()
 
 			cart := scanner.NewCartographer(16, 4*time.Second, sHost)
+			cart.WSPath = wsPath
 			rep := cart.Run(ctx, ips, wHost)
 			primary, failovers, err := scanner.RankUniqueRoutes(rep)
 			if err != nil {
@@ -289,7 +290,7 @@ func handleIPCConn(conn net.Conn, warmPool *pool.WarmPool) {
 				return
 			}
 			warmPool.ReplaceRoutesFromScan(primary, failovers)
-		}(targets, worker, spoof)
+		}(targets, worker, spoof, active.WSPath)
 
 		_ = json.NewEncoder(conn).Encode(IPCResponse{Status: "ok", Message: "scanner started"})
 

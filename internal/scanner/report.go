@@ -52,6 +52,11 @@ func RankUniqueRoutes(report *IntelligenceReport) (config.RouteCandidate, []conf
 		uniqueEdges = append(uniqueEdges, edge)
 	}
 	sort.Slice(uniqueEdges, func(i, j int) bool {
+		// A route that proved the full tunnel (WebSocket upgrade + SMUX
+		// echo) always beats a faster one that only proved TLS.
+		if uniqueEdges[i].WSVerified != uniqueEdges[j].WSVerified {
+			return uniqueEdges[i].WSVerified
+		}
 		return uniqueEdges[i].Latency < uniqueEdges[j].Latency
 	})
 
@@ -87,6 +92,19 @@ func CompileCombatProfile(report *IntelligenceReport, outputPath string) (*confi
 		return nil, fmt.Errorf("%w; profile was not written", err)
 	}
 
+	// Preserve the WebSocket path from the existing profile. Freshly ranked
+	// routes never carry one (the scanner only verifies TLS), so without
+	// this a rescan silently drops default_ws_path and the daemon stops
+	// doing the WebSocket upgrade entirely — raw SMUX frames then hit
+	// Cloudflare's HTTPS port and the connection dies with EOF.
+	if primary.WSPath == "" {
+		if existing, err := config.LoadCombatProfile(outputPath); err == nil {
+			if ws := existing.Modules.StealthFactory.DefaultWSPath; ws != "" {
+				primary.WSPath = ws
+			}
+		}
+	}
+
 	profile := config.DefaultCombatProfile(report.WorkerHost, primary, failovers)
 	data, err := json.MarshalIndent(profile, "", "  ")
 	if err != nil {
@@ -99,6 +117,9 @@ func CompileCombatProfile(report *IntelligenceReport, outputPath string) (*confi
 }
 
 func isBetterProbe(candidate, current ProbeResult) bool {
+	if candidate.WSVerified != current.WSVerified {
+		return candidate.WSVerified
+	}
 	if candidate.Direction == config.SNISPFDirectionFronting && current.Direction != config.SNISPFDirectionFronting {
 		return true
 	}
@@ -149,7 +170,7 @@ func toRouteCandidate(workerHost, defaultSpoof string, edge ProbeResult) config.
 		Fingerprint:     edge.Fingerprint,
 		ExpectedTTL:     edge.ExpectedTTL,
 		TLSHandshakeMs:  ms,
-		WSVerified:      false,
+		WSVerified:      edge.WSVerified,
 		Score:           score,
 		DPIActive:       edge.Mode == ModeTLSMicroFrag,
 	}

@@ -25,3 +25,45 @@ sudo ./bin/cornelius -i "$IFACE" -c configs/combat.profile -l 127.0.0.1:40443
 # Terminal 2: Launch Tactical TUI
 sudo ./bin/cornelius-tui -s /run/cornelius/ipc.sock
 ```
+
+## Doctor
+
+If the tunnel does not work, ask Cornelius itself:
+
+```bash
+sudo ./bin/cornelius -c configs/combat.profile doctor          # profile + tunnel + end-to-end stream test
+sudo ./bin/cornelius -c configs/combat.profile -i eth0 doctor  # also test the XDP shield
+```
+
+It prints plain-language checks (`[ok]`, `[!!]`, `[xx]`) and exits 0 when
+healthy. On a machine that forces traffic through a proxy it says so and
+skips the live test instead of reporting a false failure.
+
+## Advanced evasion
+
+- **Randomized fragmentation** (`internal/tlshandshake`): every connection
+  splits the ClientHello at unpredictable cut points, always through the
+  SNI itself — fixed cuts are a fingerprint a DPI can learn.
+- **Verified routes** (`internal/scanner`): the Cartographer promotes only
+  edges that prove the full path — TLS handshake *plus* WebSocket upgrade
+  *plus* a SMUX keepalive echo. A fast edge that cannot upgrade never
+  becomes primary.
+- **ECH** is the next step: uTLS already supports `ECHConfigs`, so the
+  daemon could hide the SNI entirely instead of fragmenting around it.
+  It needs the Worker's ECH config fetched over DoH first, with a clean
+  fallback to plain fragmentation when no config is available.
+
+## Cloudflare Worker
+
+The daemon tunnels through a Cloudflare Worker (`worker/`). It speaks SMUX v1
+over a WebSocket at the secret path — the protocol is specified in
+`worker/PROTOCOL.md`, the server code is `worker/worker.js`. Deploy it with
+`npx wrangler deploy` from `worker/`; the path in `wrangler.toml` (`WS_PATH`)
+must match `default_ws_path` in the combat profiles.
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull
+request: `gofmt` + `go vet` + `go build` + `go test`, a check that the
+committed eBPF objects match `xdp_filter.c`, and a `node --check` of the
+Worker.

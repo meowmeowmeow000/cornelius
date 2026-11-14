@@ -23,6 +23,7 @@ type Cartographer struct {
 	Concurrency int
 	Timeout     time.Duration
 	SpoofSNI    string
+	WSPath      string // secret WebSocket path; probes verify the full tunnel when set
 }
 
 func NewCartographer(concurrency int, timeout time.Duration, spoofSNI ...string) *Cartographer {
@@ -189,6 +190,7 @@ func (c *Cartographer) Run(ctx context.Context, targetIPs []string, workerHost s
 					Fingerprint: fpName,
 					ClientHello: FingerprintMap[fpName],
 					Mode:        ModeTLSFrag,
+					WSPath:      c.WSPath,
 					Timeout:     timeout,
 				}:
 				case <-ctx.Done():
@@ -217,4 +219,3 @@ func (c *Cartographer) Run(ctx context.Context, targetIPs []string, workerHost s
 	}
 	return report
 }
-

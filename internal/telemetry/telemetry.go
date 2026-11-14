@@ -51,11 +51,11 @@ type EchoSummary struct {
 }
 
 var (
-	stateMu      sync.RWMutex
-	eventRing    []EventEntry
-	latestEcho   *EchoSummary
-	scanRunning  bool
-	echoRunning  bool
+	stateMu     sync.RWMutex
+	eventRing   []EventEntry
+	latestEcho  *EchoSummary
+	scanRunning bool
+	echoRunning bool
 )
 
 const maxEventRing = 24

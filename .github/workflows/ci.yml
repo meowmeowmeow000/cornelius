@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  go:
+    name: Go build, vet and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.2"
+      - name: gofmt
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: vet
+        run: go vet ./...
+      - name: build
+        run: CGO_ENABLED=0 go build ./...
+      - name: test
+        run: go test ./...
+
+  ebpf:
+    name: eBPF objects match source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.2"
+      - name: Install clang and libbpf
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev
+      - name: Regenerate eBPF objects
+        run: make ebpf
+      - name: Committed objects are up to date
+        run: git diff --exit-code -- internal/bpf/
+
+  worker:
+    name: Worker syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Syntax check
+        run: node --check worker/worker.js

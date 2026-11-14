@@ -2,8 +2,24 @@ package tlshandshake
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
+	"math/big"
+	"sort"
 )
+
+// randomInt returns a uniform random int in [lo, hi). Falls back to the
+// midpoint when the crypto RNG is unavailable, so splitting never fails.
+func randomInt(lo, hi int) int {
+	if hi <= lo {
+		return lo
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(hi-lo)))
+	if err != nil {
+		return (lo + hi) / 2
+	}
+	return lo + int(n.Int64())
+}
 
 func SplitClientHello(record []byte, sni string, micro bool) [][]byte {
 	if len(record) < 48 || record[0] != 0x16 {
@@ -19,27 +35,36 @@ func SplitClientHello(record []byte, sni string, micro bool) [][]byte {
 	sniBytes := []byte(sni)
 	sniIdx := bytes.Index(payload, sniBytes)
 
-	var cuts []int
-	if micro && len(payload) > 64 {
-		cut1 := 37
-		cut2 := len(payload) / 2
-		if sniIdx > cut1 {
-			cut2 = sniIdx + (len(sniBytes) / 2)
+	// Randomized cuts: fixed cut points are a fingerprint — a DPI that
+	// learns them can reassemble around them. Every split still cuts
+	// through the SNI itself, so the hostname never appears whole in one
+	// record, but where the cut falls is unpredictable per connection.
+	cutSet := make(map[int]struct{})
+	addCut := func(c int) {
+		if c > 0 && c < len(payload) {
+			cutSet[c] = struct{}{}
 		}
-		if cut2 <= cut1 || cut2 >= len(payload) {
-			cut2 = (cut1 + len(payload)) / 2
-		}
-		cuts = []int{cut1, cut2}
-	} else {
-		cut := len(payload) / 2
-		if sniIdx > 0 {
-			cut = sniIdx + (len(sniBytes) / 2)
-		}
-		if cut <= 0 || cut >= len(payload) {
-			cut = len(payload) / 2
-		}
-		cuts = []int{cut}
 	}
+	if sniIdx > 0 && len(sniBytes) > 1 {
+		// Mandatory cut strictly inside the SNI span: a cut exactly at its
+		// start would leave the hostname whole in the next record.
+		addCut(randomInt(sniIdx+1, sniIdx+len(sniBytes)))
+	} else {
+		// No SNI found: cut somewhere in the middle third.
+		addCut(randomInt(len(payload)/3, 2*len(payload)/3))
+	}
+	if micro && len(payload) > 64 {
+		// 1–2 extra cuts anywhere, for 3–4 fragments instead of a fixed 3.
+		for i := 0; i < 1+randomInt(0, 2); i++ {
+			addCut(randomInt(8, len(payload)-8))
+		}
+	}
+
+	cuts := make([]int, 0, len(cutSet))
+	for c := range cutSet {
+		cuts = append(cuts, c)
+	}
+	sort.Ints(cuts)
 
 	var chunks [][]byte
 	prev := 0

@@ -1,0 +1,10 @@
+# Wrangler config for the Cornelius Worker (server side of the SMUX tunnel).
+# Deploy from this directory: `npx wrangler deploy`
+name = "cornelius-worker"
+main = "worker.js"
+compatibility_date = "2025-03-01"
+
+[vars]
+# Must match modules.stealth_factory.default_ws_path in the combat.profile
+# files AND the path the daemon dials. Rotate it in both places at once.
+WS_PATH = "/secret-knock-99"

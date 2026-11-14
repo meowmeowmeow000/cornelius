@@ -22,7 +22,7 @@
       "fragmentation_delay_ms": 2,
       "jitter_ms": 2,
       "allow_insecure_certs": false,
-      "default_ws_path": "/"
+      "default_ws_path": "/secret-knock-99"
     },
     "warm_pool": {
       "target_capacity": 8,
@@ -64,7 +64,7 @@
     "tls_handshake_ms": 208,
     "ws_verified": false,
     "confidence_score": 80,
-    "ws_path": "/"
+    "ws_path": "/secret-knock-99"
   },
   "failover_routes": [
     {
@@ -80,7 +80,7 @@
       "tls_handshake_ms": 266,
       "ws_verified": false,
       "confidence_score": 74,
-      "ws_path": "/"
+      "ws_path": "/secret-knock-99"
     },
     {
       "target_ip": "104.18.0.210",
@@ -95,7 +95,7 @@
       "tls_handshake_ms": 270,
       "ws_verified": false,
       "confidence_score": 73,
-      "ws_path": "/"
+      "ws_path": "/secret-knock-99"
     },
     {
       "target_ip": "104.18.0.50",
@@ -110,7 +110,7 @@
       "tls_handshake_ms": 272,
       "ws_verified": false,
       "confidence_score": 73,
-      "ws_path": "/"
+      "ws_path": "/secret-knock-99"
     },
     {
       "target_ip": "104.18.0.121",
@@ -125,7 +125,7 @@
       "tls_handshake_ms": 273,
       "ws_verified": false,
       "confidence_score": 73,
-      "ws_path": "/"
+      "ws_path": "/secret-knock-99"
     },
     {
       "target_ip": "104.18.0.118",
@@ -140,7 +140,7 @@
       "tls_handshake_ms": 273,
       "ws_verified": false,
       "confidence_score": 73,
-      "ws_path": "/"
+      "ws_path": "/secret-knock-99"
     }
   ]
 }

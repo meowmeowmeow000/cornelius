@@ -36,6 +36,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if flag.Arg(0) == "doctor" {
+		os.Exit(proxy.RunDoctor(ctx, *configPath, *iface))
+	}
+
 	if *iface != "" {
 		telemetry.Log.Info("Attaching XDP DPI-RST Shield...", slog.String("interface", *iface))
 		if err := bpf.AttachXDP(*iface); err != nil {
@@ -61,6 +65,11 @@ func main() {
 			targets = strings.Split(*scanCIDR, ",")
 		}
 		cart := scanner.NewCartographer(16, 4*time.Second, *spoofSNI)
+		// Let probes verify the full tunnel when the current profile knows
+		// the secret path; without it they can only verify TLS.
+		if existing, err := config.LoadCombatProfile(*configPath); err == nil {
+			cart.WSPath = existing.Modules.StealthFactory.DefaultWSPath
+		}
 		rep := cart.Run(ctx, targets, *workerSNI)
 		if _, err := scanner.CompileCombatProfile(rep, *configPath); err != nil {
 			telemetry.Log.Warn("Scan did not produce a new profile", slog.String("err", err.Error()))

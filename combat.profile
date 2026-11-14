@@ -15,7 +15,7 @@
       "rst_burst_threshold": 5
     },
     "stealth_factory": {
-      "snispf_direction": "fronting",
+      "snispf_direction": "legacy",
       "default_spoof_sni": "www.speedtest.net",
       "default_ws_path": "/secret-knock-99",
       "primary_mode": "tls_frag",
@@ -39,7 +39,7 @@
   "primary_route": {
     "target_ip": "104.18.2.161",
     "target_port": 443,
-    "snispf_direction": "fronting",
+    "snispf_direction": "legacy",
     "spoof_sni": "www.speedtest.net",
     "clean_sni": "bold-heart-a6e2.nedaymarg.workers.dev",
     "stealth_mode": "tls_frag",
@@ -55,7 +55,7 @@
     {
       "target_ip": "104.18.3.161",
       "target_port": 443,
-      "snispf_direction": "fronting",
+      "snispf_direction": "legacy",
       "spoof_sni": "www.speedtest.net",
       "clean_sni": "bold-heart-a6e2.nedaymarg.workers.dev",
       "stealth_mode": "tls_frag",
