@@ -28,10 +28,10 @@ func testProfile() *config.CombatProfile {
 	}
 }
 
-func countStatus(checks []doctorCheck, want checkStatus) int {
+func countStatus(checks []HealthCheck, want string) int {
 	n := 0
 	for _, c := range checks {
-		if c.status == want {
+		if c.Status == want {
 			n++
 		}
 	}
@@ -39,8 +39,22 @@ func countStatus(checks []doctorCheck, want checkStatus) int {
 }
 
 func TestValidateProfileHealthy(t *testing.T) {
-	if fails := countStatus(validateProfile(testProfile()), statusFail); fails != 0 {
+	if fails := countStatus(CheckProfileHealth(testProfile()), "fail"); fails != 0 {
 		t.Fatalf("healthy profile reported %d failures", fails)
+	}
+}
+
+// ECH is off in the test profile, so exactly one warning (the ECH line)
+// is expected and nothing fails.
+func TestCheckProfileHealthReportsECHOff(t *testing.T) {
+	checks := CheckProfileHealth(testProfile())
+	if warns := countStatus(checks, "warn"); warns != 1 {
+		t.Fatalf("expected 1 warning (ECH off), got %d", warns)
+	}
+	enabled := testProfile()
+	enabled.Modules.StealthFactory.ECHEnabled = true
+	if warns := countStatus(CheckProfileHealth(enabled), "warn"); warns != 0 {
+		t.Fatalf("expected 0 warnings with ECH on, got %d", warns)
 	}
 }
 
@@ -64,21 +78,21 @@ func TestValidateProfileCatchesKnownBreakage(t *testing.T) {
 	// Empty ws_path: the daemon skips the WebSocket upgrade entirely.
 	p := testProfile()
 	p.Modules.StealthFactory.DefaultWSPath = ""
-	if countStatus(validateProfile(p), statusFail) == 0 {
+	if countStatus(CheckProfileHealth(p), "fail") == 0 {
 		t.Fatal("empty default_ws_path was not flagged as a failure")
 	}
 
 	// ws_path "/": the upgrade goes to the wrong path.
 	p = testProfile()
 	p.Modules.StealthFactory.DefaultWSPath = "/"
-	if countStatus(validateProfile(p), statusFail) == 0 {
+	if countStatus(CheckProfileHealth(p), "fail") == 0 {
 		t.Fatal("default_ws_path \"/\" was not flagged as a failure")
 	}
 
 	// Fronting: Cloudflare 403s on SNI/Host mismatch.
 	p = testProfile()
 	p.Modules.StealthFactory.SNISPFDirection = config.SNISPFDirectionFronting
-	if countStatus(validateProfile(p), statusWarn) == 0 {
+	if countStatus(CheckProfileHealth(p), "warn") == 0 {
 		t.Fatal("fronting direction was not flagged as a warning")
 	}
 
@@ -86,7 +100,7 @@ func TestValidateProfileCatchesKnownBreakage(t *testing.T) {
 	p = testProfile()
 	p.WorkerHost = ""
 	p.PrimaryRoute.TargetIP = ""
-	if countStatus(validateProfile(p), statusFail) < 2 {
+	if countStatus(CheckProfileHealth(p), "fail") < 2 {
 		t.Fatal("missing worker host / target were not both flagged")
 	}
 }
@@ -111,7 +125,7 @@ func TestCheckProfileAgreement(t *testing.T) {
 		t.Fatal(err)
 	}
 	warns := checkProfileAgreement(profilePath, profile)
-	if countStatus(warns, statusWarn) < 2 {
+	if countStatus(warns, "warn") < 2 {
 		t.Fatalf("expected disagreement warnings, got %v", warns)
 	}
 }

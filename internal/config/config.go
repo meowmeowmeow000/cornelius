@@ -53,6 +53,10 @@ type StealthFactoryConfig struct {
 	FragmentationDelayMs int    `json:"fragmentation_delay_ms"`
 	JitterMs             int    `json:"jitter_ms"`
 	AllowInsecureCerts   bool   `json:"allow_insecure_certs"`
+	// ECHEnabled is the seam for Encrypted ClientHello: when the dialer
+	// learns to fetch the Worker's ECH config, this flag turns it on and
+	// the doctor panel lights up. Off today — fragmentation is the defence.
+	ECHEnabled bool `json:"ech_enabled,omitempty"`
 }
 
 type WarmPoolConfig struct {

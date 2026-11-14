@@ -6,6 +6,7 @@
 - **DPI Hop Echolocation Radar (`[t]`):** Maps intermediate router hops via Linux `IP_TTL` + `IP_RECVERR` (`MSG_ERRQUEUE`) to pinpoint exact middlebox hop distances and auto-calibrate `DecoyTTL`.
 - **Interactive Edge Route Matrix (`j`/`k` + `Enter`):** Browse discovered Cloudflare edges with confidence bars and hot-swap active tunnels zero-downtime.
 - **In-TUI Cartographer Scout (`[s]`):** Scan `/24`–`/30` subnets live from the dashboard without restarting Cornelius.
+- **Doctor panel (`[d]`):** Live health checks inside the TUI — profile, WebSocket path, SNI direction, ECH status, warm tunnels, dial failures — refreshed while open. The route matrix also shows a WS column (✓ = the edge proved the full WebSocket + SMUX tunnel, – = TLS only).
 - **4 Live `btop` Themes (`[m]`):** Cycle between *Emerald Matrix*, *Cyberpunk Neon*, *Nordic Frost*, and *Amber Phosphor*.
 
 ## Build & Run

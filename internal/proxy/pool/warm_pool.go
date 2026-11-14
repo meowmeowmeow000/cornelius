@@ -16,6 +16,7 @@ import (
 
 type WarmPool struct {
 	mu          sync.RWMutex
+	profile     *config.CombatProfile
 	activeRoute config.RouteCandidate
 	failovers   []config.RouteCandidate
 	fragDelayMs int
@@ -54,6 +55,7 @@ func NewWarmPool(profile *config.CombatProfile) *WarmPool {
 	}
 
 	return &WarmPool{
+		profile:     profile,
 		activeRoute: primary,
 		failovers:   failovers,
 		fragDelayMs: fragDelay,
@@ -63,6 +65,14 @@ func NewWarmPool(profile *config.CombatProfile) *WarmPool {
 		capacity:    capSize,
 		pipes:       make(chan net.Conn, capSize),
 	}
+}
+
+// Profile returns the profile the pool was built from, for health checks.
+// It may be nil when the pool was built without one.
+func (p *WarmPool) Profile() *config.CombatProfile {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.profile
 }
 
 func (p *WarmPool) Capacity() uint64 {

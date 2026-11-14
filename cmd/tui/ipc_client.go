@@ -91,16 +91,29 @@ type VitalSnapshot struct {
 	ScanBusy        bool             `json:"scan_busy,omitempty"`
 }
 
+type HealthCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // "ok", "warn" or "fail"
+	Detail string `json:"detail,omitempty"`
+}
+
 type IPCResponse struct {
 	Status   string         `json:"status"`
 	Message  string         `json:"message,omitempty"`
 	Snapshot *VitalSnapshot `json:"snapshot,omitempty"`
+	Checks   []HealthCheck  `json:"checks,omitempty"`
 }
 
 type statusMsg struct {
 	snap *VitalSnapshot
 	err  error
 	at   time.Time
+}
+
+type doctorMsg struct {
+	checks []HealthCheck
+	err    error
+	at     time.Time
 }
 
 type actionResultMsg struct {
@@ -140,6 +153,16 @@ func fetchStatusCmd(sockPath string) tea.Cmd {
 			return statusMsg{err: fmt.Errorf("empty snapshot"), at: time.Now()}
 		}
 		return statusMsg{snap: resp.Snapshot, at: time.Now()}
+	}
+}
+
+func fetchDoctorCmd(sockPath string) tea.Cmd {
+	return func() tea.Msg {
+		resp, err := sendIPC(sockPath, IPCCommand{Action: "doctor"})
+		if err != nil {
+			return doctorMsg{err: err, at: time.Now()}
+		}
+		return doctorMsg{checks: resp.Checks, at: time.Now()}
 	}
 }
 
