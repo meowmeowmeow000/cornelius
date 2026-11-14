@@ -23,6 +23,7 @@ type ProbeTask struct {
 	Fingerprint string
 	ClientHello utls.ClientHelloID
 	Mode        StealthMode
+	WSPath      string // secret WebSocket path to verify; empty skips the check
 	Timeout     time.Duration
 }
 
@@ -36,6 +37,7 @@ type ProbeResult struct {
 	Mode        StealthMode   `json:"mode"`
 	ExpectedTTL uint8         `json:"expected_ttl,omitempty"`
 	Success     bool          `json:"tls_verified"`
+	WSVerified  bool          `json:"ws_verified"`
 	Latency     time.Duration `json:"latency_ns"`
 	ErrStr      string        `json:"error,omitempty"`
 }

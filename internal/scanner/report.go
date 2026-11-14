@@ -52,6 +52,11 @@ func RankUniqueRoutes(report *IntelligenceReport) (config.RouteCandidate, []conf
 		uniqueEdges = append(uniqueEdges, edge)
 	}
 	sort.Slice(uniqueEdges, func(i, j int) bool {
+		// A route that proved the full tunnel (WebSocket upgrade + SMUX
+		// echo) always beats a faster one that only proved TLS.
+		if uniqueEdges[i].WSVerified != uniqueEdges[j].WSVerified {
+			return uniqueEdges[i].WSVerified
+		}
 		return uniqueEdges[i].Latency < uniqueEdges[j].Latency
 	})
 
@@ -112,6 +117,9 @@ func CompileCombatProfile(report *IntelligenceReport, outputPath string) (*confi
 }
 
 func isBetterProbe(candidate, current ProbeResult) bool {
+	if candidate.WSVerified != current.WSVerified {
+		return candidate.WSVerified
+	}
 	if candidate.Direction == config.SNISPFDirectionFronting && current.Direction != config.SNISPFDirectionFronting {
 		return true
 	}
@@ -162,7 +170,7 @@ func toRouteCandidate(workerHost, defaultSpoof string, edge ProbeResult) config.
 		Fingerprint:     edge.Fingerprint,
 		ExpectedTTL:     edge.ExpectedTTL,
 		TLSHandshakeMs:  ms,
-		WSVerified:      false,
+		WSVerified:      edge.WSVerified,
 		Score:           score,
 		DPIActive:       edge.Mode == ModeTLSMicroFrag,
 	}

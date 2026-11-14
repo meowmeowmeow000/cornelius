@@ -39,6 +39,20 @@ It prints plain-language checks (`[ok]`, `[!!]`, `[xx]`) and exits 0 when
 healthy. On a machine that forces traffic through a proxy it says so and
 skips the live test instead of reporting a false failure.
 
+## Advanced evasion
+
+- **Randomized fragmentation** (`internal/tlshandshake`): every connection
+  splits the ClientHello at unpredictable cut points, always through the
+  SNI itself — fixed cuts are a fingerprint a DPI can learn.
+- **Verified routes** (`internal/scanner`): the Cartographer promotes only
+  edges that prove the full path — TLS handshake *plus* WebSocket upgrade
+  *plus* a SMUX keepalive echo. A fast edge that cannot upgrade never
+  becomes primary.
+- **ECH** is the next step: uTLS already supports `ECHConfigs`, so the
+  daemon could hide the SNI entirely instead of fragmenting around it.
+  It needs the Worker's ECH config fetched over DoH first, with a clean
+  fallback to plain fragmentation when no config is available.
+
 ## Cloudflare Worker
 
 The daemon tunnels through a Cloudflare Worker (`worker/`). It speaks SMUX v1
