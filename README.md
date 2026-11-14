@@ -26,6 +26,19 @@ sudo ./bin/cornelius -i "$IFACE" -c configs/combat.profile -l 127.0.0.1:40443
 sudo ./bin/cornelius-tui -s /run/cornelius/ipc.sock
 ```
 
+## Doctor
+
+If the tunnel does not work, ask Cornelius itself:
+
+```bash
+sudo ./bin/cornelius -c configs/combat.profile doctor          # profile + tunnel + end-to-end stream test
+sudo ./bin/cornelius -c configs/combat.profile -i eth0 doctor  # also test the XDP shield
+```
+
+It prints plain-language checks (`[ok]`, `[!!]`, `[xx]`) and exits 0 when
+healthy. On a machine that forces traffic through a proxy it says so and
+skips the live test instead of reporting a false failure.
+
 ## Cloudflare Worker
 
 The daemon tunnels through a Cloudflare Worker (`worker/`). It speaks SMUX v1

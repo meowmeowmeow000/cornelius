@@ -36,6 +36,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	if flag.Arg(0) == "doctor" {
+		os.Exit(proxy.RunDoctor(ctx, *configPath, *iface))
+	}
+
 	if *iface != "" {
 		telemetry.Log.Info("Attaching XDP DPI-RST Shield...", slog.String("interface", *iface))
 		if err := bpf.AttachXDP(*iface); err != nil {
