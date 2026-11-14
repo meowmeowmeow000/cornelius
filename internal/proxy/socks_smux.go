@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -526,4 +527,3 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 	}()
 	wg.Wait()
 }
-

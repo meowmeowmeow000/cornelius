@@ -119,7 +119,11 @@ func DialStealthTunnel(ctx context.Context, cfg StealthDialConfig) (net.Conn, er
 	}
 
 	tlsCfg := &utls.Config{
-		ServerName:         outerSNI,
+		ServerName: outerSNI,
+		// Force HTTP/1.1 ALPN: the Chrome fingerprint advertises h2, but the
+		// WebSocket upgrade below is a raw HTTP/1.1 request. Negotiating h2
+		// makes Cloudflare reject the upgrade (200 OK / EOF).
+		NextProtos:         []string{"http/1.1"},
 		InsecureSkipVerify: cfg.AllowInsec,
 	}
 	uConn := utls.UClient(wrapped, tlsCfg, ResolveFingerprint(cfg.Route.Fingerprint))
@@ -223,4 +227,3 @@ func upgradeWebSocket(conn net.Conn, host, path string) error {
 	}
 	return nil
 }
-

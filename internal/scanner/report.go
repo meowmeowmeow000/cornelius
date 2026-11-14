@@ -87,6 +87,19 @@ func CompileCombatProfile(report *IntelligenceReport, outputPath string) (*confi
 		return nil, fmt.Errorf("%w; profile was not written", err)
 	}
 
+	// Preserve the WebSocket path from the existing profile. Freshly ranked
+	// routes never carry one (the scanner only verifies TLS), so without
+	// this a rescan silently drops default_ws_path and the daemon stops
+	// doing the WebSocket upgrade entirely — raw SMUX frames then hit
+	// Cloudflare's HTTPS port and the connection dies with EOF.
+	if primary.WSPath == "" {
+		if existing, err := config.LoadCombatProfile(outputPath); err == nil {
+			if ws := existing.Modules.StealthFactory.DefaultWSPath; ws != "" {
+				primary.WSPath = ws
+			}
+		}
+	}
+
 	profile := config.DefaultCombatProfile(report.WorkerHost, primary, failovers)
 	data, err := json.MarshalIndent(profile, "", "  ")
 	if err != nil {
