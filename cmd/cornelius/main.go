@@ -86,6 +86,17 @@ func main() {
 			slog.String("snispf_direction", profile.PrimaryRoute.SNISPFDirection),
 			slog.String("spoof_sni", profile.PrimaryRoute.SpoofSNI),
 			slog.String("worker_sni", profile.PrimaryRoute.CleanSNI))
+		// Fail fast on a profile that cannot work, instead of starting
+		// a daemon whose every dial is doomed. Warnings are logged
+		// but never block startup.
+		if err := proxy.ValidateStartupProfile(profile); err != nil {
+			telemetry.Log.Error("Startup validation failed", slog.String("err", err.Error()))
+			telemetry.Log.Error("Run `cornelius doctor` for the full report")
+			os.Exit(1)
+		}
+		for _, w := range proxy.StartupWarnings(profile) {
+			telemetry.Log.Warn("Startup check", slog.String("check", w.String()))
+		}
 	}
 
 	if profile.ExpectedTTL > 0 {
