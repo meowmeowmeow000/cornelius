@@ -90,10 +90,6 @@ instead of a raw ELF failure.
   for the default fingerprint (an explicit pin — `chrome_131`,
   `chrome_133`, `firefox_auto`, `ios_auto`, `edge_auto`, `randomized` —
   is always honoured exactly).
-- **ECH** is the next step: uTLS already supports `ECHConfigs`, so the
-  daemon could hide the SNI entirely instead of fragmenting around it.
-  It needs the Worker's ECH config fetched over DoH first, with a clean
-  fallback to plain fragmentation when no config is available.
 
 ## Cloudflare Worker
 
