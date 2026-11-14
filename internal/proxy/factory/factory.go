@@ -39,6 +39,10 @@ func ResolveFingerprint(fp string) utls.ClientHelloID {
 		return utls.HelloEdge_Auto
 	case "randomized":
 		return utls.HelloRandomized
+	case "chrome_131":
+		return utls.HelloChrome_131
+	case "chrome_133":
+		return utls.HelloChrome_133
 	default:
 		return utls.HelloChrome_Auto
 	}
@@ -185,7 +189,7 @@ func dialOnce(ctx context.Context, cfg StealthDialConfig, echList []byte, echPub
 	if cfg.ECHRejectionVerify != nil {
 		tlsCfg.EncryptedClientHelloRejectionVerify = cfg.ECHRejectionVerify
 	}
-	uConn := utls.UClient(wrapped, tlsCfg, ResolveFingerprint(cfg.Route.Fingerprint))
+	uConn := utls.UClient(wrapped, tlsCfg, PickFingerprint(cfg.Route.Fingerprint))
 	if err := uConn.HandshakeContext(ctx); err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("uTLS handshake failed (dir=%s outer=%s): %w", dir, outerSNI, err)
