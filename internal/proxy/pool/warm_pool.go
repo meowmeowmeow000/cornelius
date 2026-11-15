@@ -15,19 +15,21 @@ import (
 )
 
 type WarmPool struct {
-	mu          sync.RWMutex
-	profile     *config.CombatProfile
-	activeRoute config.RouteCandidate
-	failovers   []config.RouteCandidate
-	fragDelayMs int
-	jitterMs    int
-	allowInsec  bool
-	echEnabled  bool
-	defaultWS   string
-	capacity    int
-	pipes       chan net.Conn
-	ctx         context.Context
-	cancel      context.CancelFunc
+	mu           sync.RWMutex
+	profile      *config.CombatProfile
+	activeRoute  config.RouteCandidate
+	failovers    []config.RouteCandidate
+	fragDelayMs  int
+	jitterMs     int
+	allowInsec   bool
+	echEnabled   bool
+	echRequired  bool
+	echConfigB64 string
+	defaultWS    string
+	capacity     int
+	pipes        chan net.Conn
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 func NewWarmPool(profile *config.CombatProfile) *WarmPool {
@@ -36,6 +38,8 @@ func NewWarmPool(profile *config.CombatProfile) *WarmPool {
 	jitter := 2
 	allowInsec := false
 	echEnabled := false
+	echRequired := false
+	echConfigB64 := ""
 	defaultWS := ""
 	var primary config.RouteCandidate
 	var failovers []config.RouteCandidate
@@ -55,19 +59,23 @@ func NewWarmPool(profile *config.CombatProfile) *WarmPool {
 		}
 		allowInsec = profile.Modules.StealthFactory.AllowInsecureCerts
 		echEnabled = profile.Modules.StealthFactory.ECHEnabled
+		echRequired = profile.Modules.StealthFactory.ECHRequired
+		echConfigB64 = profile.Modules.StealthFactory.ECHConfigB64
 	}
 
 	return &WarmPool{
-		profile:     profile,
-		activeRoute: primary,
-		failovers:   failovers,
-		fragDelayMs: fragDelay,
-		jitterMs:    jitter,
-		allowInsec:  allowInsec,
-		echEnabled:  echEnabled,
-		defaultWS:   defaultWS,
-		capacity:    capSize,
-		pipes:       make(chan net.Conn, capSize),
+		profile:      profile,
+		activeRoute:  primary,
+		failovers:    failovers,
+		fragDelayMs:  fragDelay,
+		jitterMs:     jitter,
+		allowInsec:   allowInsec,
+		echEnabled:   echEnabled,
+		echRequired:  echRequired,
+		echConfigB64: echConfigB64,
+		defaultWS:    defaultWS,
+		capacity:     capSize,
+		pipes:        make(chan net.Conn, capSize),
 	}
 }
 
@@ -128,12 +136,14 @@ func (p *WarmPool) replenish() {
 func (p *WarmPool) dialCurrent(ctx context.Context) (net.Conn, error) {
 	p.mu.RLock()
 	cfg := factory.StealthDialConfig{
-		Route:       p.activeRoute,
-		FragDelayMs: p.fragDelayMs,
-		JitterMs:    p.jitterMs,
-		AllowInsec:  p.allowInsec,
-		WSPath:      p.defaultWS,
-		ECHEnabled:  p.echEnabled,
+		Route:        p.activeRoute,
+		FragDelayMs:  p.fragDelayMs,
+		JitterMs:     p.jitterMs,
+		AllowInsec:   p.allowInsec,
+		WSPath:       p.defaultWS,
+		ECHEnabled:   p.echEnabled,
+		ECHRequired:  p.echRequired,
+		ECHConfigB64: p.echConfigB64,
 	}
 	p.mu.RUnlock()
 	return factory.DialStealthTunnel(ctx, cfg)

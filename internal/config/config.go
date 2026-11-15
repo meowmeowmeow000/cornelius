@@ -53,10 +53,18 @@ type StealthFactoryConfig struct {
 	FragmentationDelayMs int    `json:"fragmentation_delay_ms"`
 	JitterMs             int    `json:"jitter_ms"`
 	AllowInsecureCerts   bool   `json:"allow_insecure_certs"`
-	// ECHEnabled is the seam for Encrypted ClientHello: when the dialer
-	// learns to fetch the Worker's ECH config, this flag turns it on and
-	// the doctor panel lights up. Off today — fragmentation is the defence.
+	// ECHEnabled turns on Encrypted ClientHello: the dialer fetches the
+	// Worker's ECH config over DoH (or uses ECHConfigB64 when set) and
+	// hides the SNI inside the encrypted ClientHello.
 	ECHEnabled bool `json:"ech_enabled,omitempty"`
+	// ECHRequired is strict mode: fail closed. With no usable ECH config,
+	// or a server that rejects ECH, the dialer refuses to dial at all
+	// instead of falling back to plain TLS with a visible SNI. Needs
+	// ECHEnabled; without a pasted config the DoH fetch runs at dial time.
+	ECHRequired bool `json:"ech_required,omitempty"`
+	// ECHConfigB64 is a pasted ECHConfigList (base64), for networks where
+	// the DoH fetch itself is blocked. When set it replaces the DoH fetch.
+	ECHConfigB64 string `json:"ech_config_b64,omitempty"`
 }
 
 type WarmPoolConfig struct {

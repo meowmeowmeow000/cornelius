@@ -84,6 +84,15 @@ type StealthDialConfig struct {
 	// publishes an ECH config. Fetch failure or a server rejection falls
 	// back to dialing without ECH — never a failed dial.
 	ECHEnabled bool
+	// ECHRequired is strict mode (fail closed): with no usable ECH config,
+	// or a server that rejects ECH, DialStealthTunnel refuses to dial
+	// instead of falling back to plain TLS. Needs ECHEnabled; the dialer
+	// enforces that itself, so a profile that sets it without ECHEnabled
+	// fails loudly instead of silently dialling plain.
+	ECHRequired bool
+	// ECHConfigB64 is a pasted ECHConfigList (base64) from the profile.
+	// When set it replaces the DoH fetch.
+	ECHConfigB64 string
 	// ECHRejectionVerify, if set, verifies a server that rejects ECH (the
 	// outer certificate, for the ECH public name). Nil means the default:
 	// verify against the system roots, ignoring InsecureSkipVerify — that
@@ -94,15 +103,50 @@ type StealthDialConfig struct {
 }
 
 func DialStealthTunnel(ctx context.Context, cfg StealthDialConfig) (net.Conn, error) {
+	if cfg.ECHRequired && !cfg.ECHEnabled {
+		return nil, fmt.Errorf("strict ECH required but ECH is not enabled: refusing to dial plain")
+	}
+
 	var echList []byte
 	var echPublic string
 	if cfg.ECHEnabled && cfg.Route.CleanSNI != "" {
-		list, err := FetchECHConfigList(ctx, cfg.Route.CleanSNI)
-		if err != nil {
-			telemetry.Log.Warn("ECH config fetch failed, dialing without ECH", "host", cfg.Route.CleanSNI, "err", err.Error())
-		} else {
-			echList = list
-			echPublic, _ = ECHPublicName(list)
+		if cfg.ECHConfigB64 != "" {
+			// A pasted config replaces the DoH fetch: the networks
+			// that need strict mode most are the ones where DoH
+			// itself is blocked.
+			list, err := DecodeECHConfigB64(cfg.ECHConfigB64)
+			if err != nil {
+				if cfg.ECHRequired {
+					return nil, fmt.Errorf("strict ECH required but the pasted config is unusable: %w", err)
+				}
+				telemetry.Log.Warn("Pasted ECH config is unusable, fetching over DoH", "host", cfg.Route.CleanSNI, "err", err.Error())
+			} else {
+				echList = list
+				echPublic, _ = ECHPublicName(list)
+			}
+		}
+		if echList == nil {
+			list, err := FetchECHConfigList(ctx, cfg.Route.CleanSNI)
+			if err != nil {
+				if cfg.ECHRequired {
+					return nil, fmt.Errorf("strict ECH required but no config could be fetched: %w", err)
+				}
+				telemetry.Log.Warn("ECH config fetch failed, dialing without ECH", "host", cfg.Route.CleanSNI, "err", err.Error())
+			} else {
+				echList = list
+				// The public name is the outer SNI the fragmenter
+				// cuts through. A config that will not parse is
+				// unusable in strict mode; without it, keep the old
+				// lenient path.
+				name, perr := ECHPublicName(list)
+				if perr != nil {
+					if cfg.ECHRequired {
+						return nil, fmt.Errorf("strict ECH required but the fetched config does not parse: %w", perr)
+					}
+					telemetry.Log.Warn("ECH config does not parse, dialing without a public name", "host", cfg.Route.CleanSNI, "err", perr.Error())
+				}
+				echPublic = name
+			}
 		}
 	}
 
@@ -111,6 +155,11 @@ func DialStealthTunnel(ctx context.Context, cfg StealthDialConfig) (net.Conn, er
 		return conn, nil
 	}
 	if echList != nil && isECHRejection(err) {
+		if cfg.ECHRequired {
+			// Fail closed: a server that strips ECH must not silently
+			// downgrade the connection to a visible SNI.
+			return nil, fmt.Errorf("strict ECH required: server rejected ECH: %w", err)
+		}
 		// The server rejected ECH: retry once without it. The next dial
 		// re-fetches fresh configs from DoH, so a retry-config update is
 		// picked up then instead of being chased here.

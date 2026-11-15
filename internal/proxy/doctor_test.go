@@ -58,6 +58,51 @@ func TestCheckProfileHealthReportsECHOff(t *testing.T) {
 	}
 }
 
+// TestCheckProfileHealthStrictECH covers the strict-mode profile checks:
+// required without enabled is a failure, a broken pasted config is a
+// failure, and a valid strict setup passes with only the expected warning
+// about the DoH fetch running at dial time.
+func TestCheckProfileHealthStrictECH(t *testing.T) {
+	// Required without enabled: contradictory, must fail.
+	p := testProfile()
+	p.Modules.StealthFactory.ECHEnabled = false
+	p.Modules.StealthFactory.ECHRequired = true
+	if countStatus(CheckProfileHealth(p), "fail") == 0 {
+		t.Fatal("ech_required without ech_enabled was not flagged as a failure")
+	}
+
+	// Broken pasted config: must fail even in opportunistic mode.
+	p = testProfile()
+	p.Modules.StealthFactory.ECHConfigB64 = "not-base64!!!"
+	if countStatus(CheckProfileHealth(p), "fail") == 0 {
+		t.Fatal("broken pasted ECH config was not flagged as a failure")
+	}
+
+	// Valid strict setup with a pasted config: no failures, no warnings.
+	p = testProfile()
+	p.Modules.StealthFactory.ECHEnabled = true
+	p.Modules.StealthFactory.ECHRequired = true
+	p.Modules.StealthFactory.ECHConfigB64 = "AEX+DQBBZQAgACAOj1t+953ib/8pSWcLg5LSAYErxMb1kJVE0R3m/XdmagAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
+	if fails := countStatus(CheckProfileHealth(p), "fail"); fails != 0 {
+		t.Fatalf("valid strict profile reported %d failures", fails)
+	}
+	if warns := countStatus(CheckProfileHealth(p), "warn"); warns != 0 {
+		t.Fatalf("valid strict profile with a pasted config reported %d warnings", warns)
+	}
+
+	// Strict without a pasted config: passes, but warns that DoH runs at
+	// dial time and a blocked DoH means the tunnel stays down.
+	p = testProfile()
+	p.Modules.StealthFactory.ECHEnabled = true
+	p.Modules.StealthFactory.ECHRequired = true
+	if fails := countStatus(CheckProfileHealth(p), "fail"); fails != 0 {
+		t.Fatalf("strict profile without a pasted config reported %d failures", fails)
+	}
+	if warns := countStatus(CheckProfileHealth(p), "warn"); warns != 1 {
+		t.Fatalf("expected 1 warning (no pasted config), got %d", warns)
+	}
+}
+
 func TestProxyEnvSet(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "")
 	t.Setenv("https_proxy", "")

@@ -120,3 +120,29 @@ func TestECHPublicNameInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeECHConfigB64(t *testing.T) {
+	// The real published config decodes and parses.
+	list, err := DecodeECHConfigB64(testECHBase64)
+	if err != nil {
+		t.Fatalf("valid pasted config should decode: %v", err)
+	}
+	name, err := ECHPublicName(list)
+	if err != nil {
+		t.Fatalf("decoded config should parse: %v", err)
+	}
+	if name != "cloudflare-ech.com" {
+		t.Fatalf("public name = %q, want cloudflare-ech.com", name)
+	}
+
+	for _, bad := range []string{
+		"",
+		"not-base64!!!",
+		base64.StdEncoding.EncodeToString([]byte{0x00, 0x01, 0x02}), // too short
+		base64.StdEncoding.EncodeToString([]byte("this is not an ECH config list at all, just text........")),
+	} {
+		if _, err := DecodeECHConfigB64(bad); err == nil {
+			t.Fatalf("DecodeECHConfigB64(%q) should fail", bad)
+		}
+	}
+}
