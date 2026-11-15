@@ -78,10 +78,27 @@ func CheckProfileHealth(p *config.CombatProfile) []HealthCheck {
 		out = append(out, HealthCheck{"SNI direction is legacy", "fail", "unknown direction " + sf.SNISPFDirection})
 	}
 
-	if sf.ECHEnabled {
+	switch {
+	case sf.ECHEnabled && sf.ECHRequired:
+		out = append(out, HealthCheck{"ECH encrypts the SNI", "ok", "strict mode — the tunnel stays down rather than dial without ECH"})
+	case sf.ECHEnabled:
 		out = append(out, HealthCheck{"ECH encrypts the SNI", "ok", "the ClientHello hides the Worker hostname"})
-	} else {
+	default:
 		out = append(out, HealthCheck{"ECH encrypts the SNI", "warn", "off — the SNI is visible; randomized fragmentation is the active defence"})
+	}
+
+	if sf.ECHRequired && !sf.ECHEnabled {
+		out = append(out, HealthCheck{"ECH strict mode is consistent", "fail", "ech_required is set but ech_enabled is off — strict mode needs ECH on"})
+	}
+	if sf.ECHEnabled && sf.ECHRequired && sf.ECHConfigB64 == "" {
+		out = append(out, HealthCheck{"strict ECH has a config source", "warn", "no pasted config — the DoH fetch runs at dial time, and if DoH is blocked the tunnel stays down"})
+	}
+	if sf.ECHConfigB64 != "" {
+		if _, err := factory.DecodeECHConfigB64(sf.ECHConfigB64); err != nil {
+			out = append(out, HealthCheck{"pasted ECH config is valid", "fail", err.Error()})
+		} else {
+			out = append(out, HealthCheck{"pasted ECH config is valid", "ok", "the profile carries its own ECH config; no DoH fetch needed"})
+		}
 	}
 
 	route := p.PrimaryRoute
@@ -198,19 +215,37 @@ func RunDoctor(ctx context.Context, profilePath, iface string) int {
 	}
 
 	// ECH config check: when ECH is on, the Worker host must publish a
-	// config for the dialer to fetch. This runs even on proxied machines —
-	// the DoH fetch goes through the proxy like any other HTTPS request.
+	// config for the dialer to fetch, or the profile must carry a pasted
+	// one. This runs even on proxied machines — the DoH fetch goes
+	// through the proxy like any other HTTPS request.
 	sf := profile.Modules.StealthFactory
 	if sf.ECHEnabled {
-		list, err := factory.FetchECHConfigList(ctx, profile.WorkerHost)
-		switch {
-		case err != nil:
-			printCheck(HealthCheck{"ECH config is published", "warn", "could not fetch it (" + err.Error() + ") — the dialer will fall back to fragmentation without ECH"})
-		case func() bool { _, err := factory.ECHPublicName(list); return err != nil }():
-			printCheck(HealthCheck{"ECH config is published", "warn", "fetched but unreadable — the dialer will fall back to fragmentation without ECH"})
-		default:
+		if sf.ECHConfigB64 != "" {
+			// Pasted config: already validated by CheckProfileHealth
+			// above (doctor stops before this point on any failure),
+			// so report the source instead of fetching.
+			list, _ := factory.DecodeECHConfigB64(sf.ECHConfigB64)
 			name, _ := factory.ECHPublicName(list)
-			printCheck(HealthCheck{"ECH config is published", "ok", fmt.Sprintf("public name %s (%d bytes)", name, len(list))})
+			printCheck(HealthCheck{"ECH config is published", "ok", fmt.Sprintf("pasted in the profile — public name %s (%d bytes), no DoH fetch needed", name, len(list))})
+		} else {
+			list, err := factory.FetchECHConfigList(ctx, profile.WorkerHost)
+			switch {
+			case err != nil:
+				detail := "could not fetch it (" + err.Error() + ") — the dialer will fall back to fragmentation without ECH"
+				if sf.ECHRequired {
+					detail = "could not fetch it (" + err.Error() + ") — in strict mode the dialer will refuse to dial"
+				}
+				printCheck(HealthCheck{"ECH config is published", "warn", detail})
+			case func() bool { _, err := factory.ECHPublicName(list); return err != nil }():
+				detail := "fetched but unreadable — the dialer will fall back to fragmentation without ECH"
+				if sf.ECHRequired {
+					detail = "fetched but unreadable — in strict mode the dialer will refuse to dial"
+				}
+				printCheck(HealthCheck{"ECH config is published", "warn", detail})
+			default:
+				name, _ := factory.ECHPublicName(list)
+				printCheck(HealthCheck{"ECH config is published", "ok", fmt.Sprintf("public name %s (%d bytes)", name, len(list))})
+			}
 		}
 	}
 
@@ -226,12 +261,14 @@ func RunDoctor(ctx context.Context, profilePath, iface string) int {
 	dialCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	conn, err := factory.DialStealthTunnel(dialCtx, factory.StealthDialConfig{
-		Route:       profile.PrimaryRoute,
-		FragDelayMs: sf.FragmentationDelayMs,
-		JitterMs:    sf.JitterMs,
-		AllowInsec:  sf.AllowInsecureCerts,
-		WSPath:      sf.DefaultWSPath,
-		ECHEnabled:  sf.ECHEnabled,
+		Route:        profile.PrimaryRoute,
+		FragDelayMs:  sf.FragmentationDelayMs,
+		JitterMs:     sf.JitterMs,
+		AllowInsec:   sf.AllowInsecureCerts,
+		WSPath:       sf.DefaultWSPath,
+		ECHEnabled:   sf.ECHEnabled,
+		ECHRequired:  sf.ECHRequired,
+		ECHConfigB64: sf.ECHConfigB64,
 	})
 	if err != nil {
 		printCheck(HealthCheck{"tunnel dials and upgrades", "fail", err.Error()})

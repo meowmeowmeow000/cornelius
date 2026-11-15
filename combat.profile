@@ -23,7 +23,9 @@
       "fragmentation_delay_ms": 2,
       "jitter_ms": 2,
       "allow_insecure_certs": false,
-      "ech_enabled": true
+      "ech_enabled": true,
+      "ech_required": false,
+      "ech_config_b64": ""
     },
     "warm_pool": {
       "target_capacity": 3,

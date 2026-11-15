@@ -80,6 +80,30 @@ func FetchECHConfigList(ctx context.Context, host string) ([]byte, error) {
 	return list, nil
 }
 
+// DecodeECHConfigB64 decodes a pasted ECHConfigList (base64) from the
+// profile and verifies it parses: a config the dialer cannot read is
+// worse than no config, because the operator believes ECH is on. Both
+// standard and URL-safe base64 are accepted, matching the DoH parser.
+func DecodeECHConfigB64(s string) ([]byte, error) {
+	if s == "" {
+		return nil, errors.New("pasted ECH config is empty")
+	}
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		raw, err = base64.RawURLEncoding.DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("pasted ECH config is not valid base64: %w", err)
+		}
+	}
+	if len(raw) < 4 {
+		return nil, errors.New("pasted ECH config is too short")
+	}
+	if _, err := ECHPublicName(raw); err != nil {
+		return nil, fmt.Errorf("pasted ECH config does not parse: %w", err)
+	}
+	return raw, nil
+}
+
 type dohResponse struct {
 	Answer []struct {
 		Data string `json:"data"`
