@@ -2,12 +2,14 @@ package factory
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -104,6 +106,103 @@ func DecodeECHConfigB64(s string) ([]byte, error) {
 	return raw, nil
 }
 
+// FetchECHConfigListOverConn fetches the ECH config for host over an
+// already-established tunnel stream (conn), instead of a direct DoH
+// query: the request travels inside the tunnel, so the ISP sees no DoH
+// query at all and Cloudflare DNS sees the query coming from the
+// Worker's egress, not the user's address. The conn must already be
+// connected to cloudflare-dns.com:443 — the caller opens the stream and
+// wraps it as a net.Conn; this function performs the TLS handshake over
+// it (verified against the system roots with tlsCfg, which must carry
+// ServerName cloudflare-dns.com) and the HTTPS request. Returns the raw
+// list and its TTL.
+func FetchECHConfigListOverConn(ctx context.Context, host string, conn net.Conn, tlsCfg *tls.Config) ([]byte, time.Duration, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// The transport dials nowhere: the tunnel stream IS the connection,
+	// and it is single-use — a second dial (a redirect follow, a retry)
+	// must fail cleanly instead of writing a second request onto a
+	// stream whose TLS session is already in use. TLS is still verified
+	// against the system roots — the Worker relays the stream to the
+	// real Cloudflare DNS, so its certificate is genuine and a
+	// middlebox cannot substitute its own.
+	var dialMu sync.Mutex
+	dialed := false
+	tr := &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			dialMu.Lock()
+			defer dialMu.Unlock()
+			if dialed {
+				return nil, errors.New("DoH over-tunnel connection is single-use and already used")
+			}
+			dialed = true
+			return conn, nil
+		},
+		TLSClientConfig:   tlsCfg,
+		DisableKeepAlives: true,
+	}
+	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error {
+		// Never follow a redirect: there is no second connection to
+		// follow it with, and the DoH endpoint answers directly.
+		return http.ErrUseLastResponse
+	}}
+	q := "https://cloudflare-dns.com/dns-query?name=" + url.QueryEscape(host) + "&type=HTTPS"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, q, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Accept", "application/dns-json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("DoH query for %s through the tunnel failed: %w", host, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, 0, fmt.Errorf("DoH query for %s through the tunnel returned HTTP %s", host, resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return nil, 0, err
+	}
+	return parseECHConfigFromDoH(body, host)
+}
+
+// StoreECHConfig writes a fetched list into the cache with the same
+// TTL clamping as a direct fetch, so a config fetched through the
+// tunnel is used by the dialer exactly like one fetched directly.
+func StoreECHConfig(host string, list []byte, ttl time.Duration) {
+	expires := time.Now().Add(ttl)
+	if min := time.Now().Add(5 * time.Minute); expires.Before(min) {
+		expires = min
+	}
+	if max := time.Now().Add(time.Hour); expires.After(max) {
+		expires = max
+	}
+	echCacheMu.Lock()
+	echCache[host] = cachedECH{list: list, expires: expires}
+	echCacheMu.Unlock()
+}
+
+// ECHConfigFresh reports whether a usable cached config exists for host,
+// so a refresher can skip the work when the dialer already has one.
+func ECHConfigFresh(host string) bool {
+	_, ok := CachedECHConfig(host)
+	return ok
+}
+
+// CachedECHConfig returns the cached config for host, if one exists and
+// has not expired.
+func CachedECHConfig(host string) ([]byte, bool) {
+	echCacheMu.Lock()
+	defer echCacheMu.Unlock()
+	hit, ok := echCache[host]
+	if !ok || !time.Now().Before(hit.expires) {
+		return nil, false
+	}
+	return hit.list, true
+}
+
 type dohResponse struct {
 	Answer []struct {
 		Data string `json:"data"`
@@ -133,6 +232,13 @@ func fetchECHConfigList(ctx context.Context, host string) ([]byte, time.Duration
 	if err != nil {
 		return nil, 0, err
 	}
+	return parseECHConfigFromDoH(body, host)
+}
+
+// parseECHConfigFromDoH extracts the raw ECHConfigList and its TTL from
+// a DoH JSON body. Shared by the direct fetch and the through-tunnel
+// fetch, so both agree on what counts as a usable config.
+func parseECHConfigFromDoH(body []byte, host string) ([]byte, time.Duration, error) {
 	var doh dohResponse
 	if err := json.Unmarshal(body, &doh); err != nil {
 		return nil, 0, fmt.Errorf("DoH response for %s is not valid JSON: %w", host, err)

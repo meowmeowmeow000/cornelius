@@ -2,12 +2,15 @@ package factory
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // The real ECH config for bold-heart-a6e2.nedaymarg.workers.dev, as
@@ -144,5 +147,67 @@ func TestDecodeECHConfigB64(t *testing.T) {
 		if _, err := DecodeECHConfigB64(bad); err == nil {
 			t.Fatalf("DecodeECHConfigB64(%q) should fail", bad)
 		}
+	}
+}
+
+func TestFetchECHConfigListOverConn(t *testing.T) {
+	answer := dohAnswer(`1 . ech=` + testECHBase64)
+	dohSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/dns-json")
+		_, _ = w.Write([]byte(answer))
+	}))
+	defer dohSrv.Close()
+
+	raw, err := net.Dial("tcp", dohSrv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+
+	list, ttl, err := FetchECHConfigListOverConn(context.Background(), "over-conn.example", raw, &tls.Config{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"http/1.1"},
+	})
+	if err != nil {
+		t.Fatalf("over-conn fetch failed: %v", err)
+	}
+	want, _ := base64.StdEncoding.DecodeString(testECHBase64)
+	if string(list) != string(want) {
+		t.Fatal("fetched list does not match the published config")
+	}
+	if ttl != 300*time.Second {
+		t.Fatalf("ttl = %v, want 300s", ttl)
+	}
+}
+
+func TestFetchECHConfigListOverConnBadStatus(t *testing.T) {
+	dohSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer dohSrv.Close()
+
+	raw, err := net.Dial("tcp", dohSrv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+
+	if _, _, err := FetchECHConfigListOverConn(context.Background(), "over-conn-500.example", raw, &tls.Config{InsecureSkipVerify: true}); err == nil {
+		t.Fatal("expected an error on DoH HTTP 500 through the tunnel")
+	}
+}
+
+func TestStoreECHConfigFresh(t *testing.T) {
+	want, _ := base64.StdEncoding.DecodeString(testECHBase64)
+	StoreECHConfig("fresh.example", want, 300*time.Second)
+	if !ECHConfigFresh("fresh.example") {
+		t.Fatal("stored config should be fresh")
+	}
+	got, ok := CachedECHConfig("fresh.example")
+	if !ok || string(got) != string(want) {
+		t.Fatal("cached config does not match the stored one")
+	}
+	if ECHConfigFresh("other.example") {
+		t.Fatal("a host with no stored config should not be fresh")
 	}
 }
