@@ -328,6 +328,21 @@ func RunDoctor(ctx context.Context, profilePath, iface string) int {
 	}
 	printCheck(HealthCheck{"a real stream works end to end", "ok", "fetched example.com through the tunnel, got " + strings.TrimSpace(strings.SplitN(string(buf[:n]), "\r\n", 2)[0])})
 
+	// ECH refresh through the tunnel: reuse this session to fetch the
+	// Worker's ECH config through the tunnel itself, the way the
+	// daemon's refresher loop does. A warn, not a fail — the tunnel
+	// works either way, and the direct DoH fetch remains the fallback.
+	if sf.ECHEnabled {
+		list, _, err := fetchECHThroughSession(dialCtx, sess, profile.WorkerHost)
+		switch {
+		case err != nil:
+			printCheck(HealthCheck{"ECH config refreshes through the tunnel", "warn", "could not fetch it through the tunnel (" + err.Error() + ") — the dialer will keep using direct DoH"})
+		default:
+			name, _ := factory.ECHPublicName(list)
+			printCheck(HealthCheck{"ECH config refreshes through the tunnel", "ok", fmt.Sprintf("public name %s (%d bytes), no direct DoH query", name, len(list))})
+		}
+	}
+
 	// XDP shield: only tested when an interface is given, because attaching
 	// needs root and a real interface.
 	if iface != "" {

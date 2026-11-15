@@ -90,6 +90,17 @@ instead of a raw ELF failure.
   reports the mode and the config source. Off by default: strict mode
   trades availability for secrecy, so only turn it on where a failed
   dial is better than a visible SNI.
+  - **Refresh through the tunnel:** once a tunnel is up, a refresher
+  loop keeps the config fresh through the tunnel itself instead of
+  direct DoH — every minute it checks the cache, and when the config is
+  stale it opens one stream to cloudflare-dns.com through a warm tunnel
+  and fetches it there. The ISP then sees no DoH query at all, and the
+  query reaches Cloudflare DNS from the Worker's egress rather than the
+  user's address. Cold start still uses direct DoH (or the pasted
+  config in strict mode); if DoH is blocked at startup in non-strict
+  mode, the first dials fall back to fragmentation, the pool warms, and
+  the refresher upgrades later dials to ECH. `cornelius doctor` proves
+  the refresh path on the live tunnel.
 - **Fingerprint depth** (`internal/proxy/factory`): the Chrome hello is
   already deep in uTLS 1.8.2 — extension order is shuffled on every
   handshake the way BoringSSL does it, a GREASE ECH extension is sent

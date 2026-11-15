@@ -115,6 +115,11 @@ func main() {
 	}
 	defer warmPool.Close()
 
+	// Keep the ECH config fresh through the tunnel once it is up, so the
+	// dialer rarely needs a direct DoH query after bootstrap. No-op when
+	// ECH is off or the profile has no Worker host.
+	proxy.StartECHRefreshLoop(ctx, warmPool, profile)
+
 	if profile.PrimaryRoute.TargetIP != "" {
 		telemetry.RecordEvent("BOOT", "info", "Active edge "+profile.PrimaryRoute.TargetIP+" ("+profile.PrimaryRoute.SNISPFDirection+")")
 	}
