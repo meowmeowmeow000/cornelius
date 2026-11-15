@@ -22,6 +22,24 @@ func TestValidateStartupProfile(t *testing.T) {
 		{"unknown direction", func(p *config.CombatProfile) { p.Modules.StealthFactory.SNISPFDirection = "sideways" }, "SNI direction is legacy"},
 		{"no primary target", func(p *config.CombatProfile) { p.PrimaryRoute.TargetIP = "" }, "primary route has a target"},
 		{"no clean SNI", func(p *config.CombatProfile) { p.PrimaryRoute.CleanSNI = "" }, "route knows the Worker host"},
+		{"strict without ECH", func(p *config.CombatProfile) {
+			p.Modules.StealthFactory.ECHEnabled = false
+			p.Modules.StealthFactory.ECHRequired = true
+		}, "ECH strict mode is consistent"},
+		{"strict with broken pasted config", func(p *config.CombatProfile) {
+			p.Modules.StealthFactory.ECHEnabled = true
+			p.Modules.StealthFactory.ECHRequired = true
+			p.Modules.StealthFactory.ECHConfigB64 = "not-base64!!!"
+		}, "pasted ECH config is valid"},
+		{"strict with valid pasted config", func(p *config.CombatProfile) {
+			p.Modules.StealthFactory.ECHEnabled = true
+			p.Modules.StealthFactory.ECHRequired = true
+			p.Modules.StealthFactory.ECHConfigB64 = "AEX+DQBBZQAgACAOj1t+953ib/8pSWcLg5LSAYErxMb1kJVE0R3m/XdmagAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
+		}, ""},
+		{"strict without pasted config warns only", func(p *config.CombatProfile) {
+			p.Modules.StealthFactory.ECHEnabled = true
+			p.Modules.StealthFactory.ECHRequired = true
+		}, ""},
 		// An empty profile (the IPC-injection path) must never pass
 		// validation: the daemon only skips this check when no profile
 		// file loaded at all.

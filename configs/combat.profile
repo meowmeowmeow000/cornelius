@@ -23,6 +23,8 @@
       "jitter_ms": 2,
       "allow_insecure_certs": false,
       "ech_enabled": true,
+      "ech_required": false,
+      "ech_config_b64": "",
       "default_ws_path": "/secret-knock-99"
     },
     "warm_pool": {

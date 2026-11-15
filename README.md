@@ -80,6 +80,16 @@ instead of a raw ELF failure.
   ECH cannot silently downgrade the connection. Needs uTLS ≥ 1.8.2
   (v1.6.7 only had the parser and a GREASE extension that could not be
   configured for real ECH).
+  - **Strict mode** (`ech_required: true` in the profile) flips the
+  default: with no usable ECH config, or a server that rejects ECH, the
+  dialer refuses to dial at all instead of falling back — the tunnel
+  stays down rather than leak the hostname. `ech_config_b64` carries a
+  pasted ECH config (base64) for networks where the DoH fetch itself is
+  blocked; when set it replaces the fetch. A pasted config that does not
+  decode or parse fails startup validation, and `cornelius doctor`
+  reports the mode and the config source. Off by default: strict mode
+  trades availability for secrecy, so only turn it on where a failed
+  dial is better than a visible SNI.
 - **Fingerprint depth** (`internal/proxy/factory`): the Chrome hello is
   already deep in uTLS 1.8.2 — extension order is shuffled on every
   handshake the way BoringSSL does it, a GREASE ECH extension is sent
