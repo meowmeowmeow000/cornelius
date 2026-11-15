@@ -14,16 +14,37 @@ import (
 	"time"
 )
 
+// verifyTimeout bounds the whole WebSocket + SMUX verification, and
+// nopResend is how often the NOP is re-sent while waiting for echoes.
+// Aether's scanner learned this the hard way (v2.1.0): a data-plane probe
+// sent once and never repeated means a single lost packet costs the whole
+// per-probe budget instead of 700 ms. Cornelius's NOP echo had exactly
+// that failure mode — one NOP, one chance, up to 8 s wasted.
+const (
+	verifyTimeout   = 8 * time.Second
+	nopResend       = 700 * time.Millisecond
+	nopEchoesNeeded = 2
+)
+
 // verifyTunnel checks the full path, not just the TLS handshake: it performs
-// the WebSocket upgrade at wsPath and waits for a SMUX NOP echo. A route
+// the WebSocket upgrade at wsPath and waits for SMUX NOP echoes. A route
 // that handshakes but cannot upgrade (wrong path, dead Worker, 403) must
 // never be promoted to primary — that is exactly how the tunnel used to
 // fail while the scanner called the edge "clean".
 //
+// It returns (verified, reason). reason is "" on success and names the
+// failure otherwise, so the doctor and the strategist can tell a route
+// that handshakes but passes no traffic ("no-traffic") from one that never
+// handshakes at all:
+//   - "upgrade": no WebSocket 101 (wrong path, 403, dead Worker)
+//   - "no-traffic": upgraded, but no SMUX echo before the deadline
+//   - "closed": the connection errored after the upgrade
+//
 // conn is the post-handshake TLS connection. It is left open for the caller
-// to close; this function never closes it.
-func verifyTunnel(ctx context.Context, conn net.Conn, host, wsPath string) bool {
-	deadline := time.Now().Add(8 * time.Second)
+// to close; this function never closes it. On success the connection
+// deadline is restored to the verification deadline, as before.
+func verifyTunnel(ctx context.Context, conn net.Conn, host, wsPath string) (bool, string) {
+	deadline := time.Now().Add(verifyTimeout)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 		deadline = dl
 	}
@@ -31,22 +52,22 @@ func verifyTunnel(ctx context.Context, conn net.Conn, host, wsPath string) bool 
 
 	var keyBytes [16]byte
 	if _, err := rand.Read(keyBytes[:]); err != nil {
-		return false
+		return false, "closed"
 	}
 	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36\r\n\r\n",
 		wsPath, host, base64.StdEncoding.EncodeToString(keyBytes[:]))
 	if _, err := conn.Write([]byte(req)); err != nil {
-		return false
+		return false, "closed"
 	}
 	br := bufio.NewReader(conn)
 	statusLine, err := br.ReadString('\n')
 	if err != nil || !strings.Contains(statusLine, "101") {
-		return false
+		return false, "upgrade"
 	}
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil {
-			return false
+			return false, "upgrade"
 		}
 		if line == "\r\n" || line == "\n" {
 			break
@@ -54,20 +75,56 @@ func verifyTunnel(ctx context.Context, conn net.Conn, host, wsPath string) bool 
 	}
 
 	// SMUX NOP frame: [version=1][cmd=3][len=0 LE][stream=0 LE].
+	// Sent once now, then re-sent every nopResend until nopEchoesNeeded
+	// echoes arrive — one lost NOP must not cost the whole probe.
 	nop := []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 	if err := writeWSBinary(conn, nop); err != nil {
-		return false
+		return false, "closed"
 	}
+	echoes := 0
+	resend := time.NewTicker(nopResend)
+	defer resend.Stop()
 	for {
+		// Short read window so the resend ticker gets checked
+		// regularly; a blocking read would stall resends entirely.
+		// NOTE: SetDeadline covers writes too, so the deadline must be
+		// refreshed before every resend write — a write attempted
+		// under an already-expired read deadline fails instantly.
+		readDeadline := time.Now().Add(100 * time.Millisecond)
+		if readDeadline.After(deadline) {
+			readDeadline = deadline
+		}
+		_ = conn.SetDeadline(readDeadline)
 		msg, err := readWSMessage(br, conn)
-		if err != nil {
-			return false
+		if err == nil {
+			if len(msg) == 8 && msg[0] == 0x01 && msg[1] == 0x03 {
+				echoes++
+				if echoes >= nopEchoesNeeded {
+					// Restore the verification deadline for the
+					// caller's later use of the connection.
+					_ = conn.SetDeadline(deadline)
+					return true, ""
+				}
+			}
+			// Any other message (e.g. a stray FIN) is not the echo;
+			// keep waiting until the deadline.
+			continue
 		}
-		if len(msg) == 8 && msg[0] == 0x01 && msg[1] == 0x03 {
-			return true // NOP echo: the Worker speaks SMUX
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			if time.Now().After(deadline) || ctx.Err() != nil {
+				return false, "no-traffic"
+			}
+			select {
+			case <-resend.C:
+				_ = conn.SetDeadline(deadline)
+				if err := writeWSBinary(conn, nop); err != nil {
+					return false, "closed"
+				}
+			default:
+			}
+			continue
 		}
-		// Any other message (e.g. a stray FIN) is not the echo; keep waiting
-		// until the deadline.
+		return false, "closed"
 	}
 }
 
