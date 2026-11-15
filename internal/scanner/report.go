@@ -92,6 +92,15 @@ func CompileCombatProfile(report *IntelligenceReport, outputPath string) (*confi
 		return nil, fmt.Errorf("%w; profile was not written", err)
 	}
 
+	// Remember the winning gateway in the last-good ring beside the
+	// profile, so the next scan tries it first. Best-effort: the ring
+	// is a cache and must never fail a profile write.
+	if ringPath := LastGoodPath(outputPath); ringPath != "" {
+		ring := LoadLastGood(ringPath)
+		ring.Record(primary.TargetIP)
+		_ = ring.Save(ringPath)
+	}
+
 	// Preserve the WebSocket path from the existing profile. Freshly ranked
 	// routes never carry one (the scanner only verifies TLS), so without
 	// this a rescan silently drops default_ws_path and the daemon stops

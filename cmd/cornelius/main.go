@@ -26,6 +26,7 @@ func main() {
 	iface := flag.String("i", "", "Network interface for XDP Shield (e.g., eth0)")
 	listenAddr := flag.String("l", "127.0.0.1:40443", "Local proxy listen address")
 	scanCIDR := flag.String("scan", "", "Optional CIDR or comma-separated IPs to scan before starting")
+	scanMode := flag.String("scan-mode", "balanced", "Scan strategy: turbo, balanced, thorough, verified, ironclad")
 	workerSNI := flag.String("worker", "", "Inner worker SNI hostname for pre-boot scan")
 	spoofSNI := flag.String("spoof", "", "Optional outer SpoofSNI for dual-direction SNISPF fronting")
 	flag.Parse()
@@ -65,6 +66,16 @@ func main() {
 			targets = strings.Split(*scanCIDR, ",")
 		}
 		cart := scanner.NewCartographer(16, 4*time.Second, *spoofSNI)
+		mode, ok := scanner.LookupScanMode(*scanMode)
+		if !ok {
+			telemetry.Log.Error("Unknown scan mode", slog.String("mode", *scanMode))
+			os.Exit(1)
+		}
+		cart.Mode = mode
+		// Try the last-good ring first: gateways that worked before
+		// usually still work, and a cold sweep costs minutes.
+		ring := scanner.LoadLastGood(scanner.LastGoodPath(*configPath))
+		targets = scanner.SeedTargets(ring, targets)
 		// Let probes verify the full tunnel when the current profile knows
 		// the secret path; without it they can only verify TLS.
 		if existing, err := config.LoadCombatProfile(*configPath); err == nil {
