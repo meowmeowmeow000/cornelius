@@ -106,7 +106,11 @@ export default {
       let socket;
       try {
         socket = connect({ hostname: target.host, port: target.port });
-      } catch {
+      } catch (e) {
+        // Diagnostic: the catch used to swallow this silently, so a failed
+        // dial looked exactly like a dead tunnel. Log it so `wrangler tail`
+        // shows the real reason (e.g. plan-gated sockets).
+        console.error("cornelius connect failed:", target.host, target.port, e && e.message ? e.message : e);
         closeStream(id);
         return;
       }
