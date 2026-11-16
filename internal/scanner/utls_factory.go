@@ -101,7 +101,9 @@ func DialStealthProbe(ctx context.Context, task ProbeTask) (*ProbeResult, error)
 	// A TLS handshake alone does not prove the tunnel works — verify the
 	// WebSocket upgrade and the SMUX keepalive echo when we know the path.
 	if task.WSPath != "" {
-		res.WSVerified = verifyTunnel(dialCtx, uConn, task.TargetSNI, task.WSPath)
+		ok, reason := verifyTunnel(dialCtx, uConn, task.TargetSNI, task.WSPath)
+		res.WSVerified = ok
+		res.VerifyErr = reason
 	}
 
 	if ttl := bpf.LookupFlowTTL(rawConn.LocalAddr(), rawConn.RemoteAddr()); ttl > 0 {
