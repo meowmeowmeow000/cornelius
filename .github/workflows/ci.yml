@@ -23,6 +23,7 @@ jobs:
         run: go test ./...
       - name: test with race detector
         run: go test -race ./...
+
   ebpf:
     name: eBPF objects match source
     runs-on: ubuntu-latest
@@ -37,6 +38,7 @@ jobs:
         run: make ebpf
       - name: Committed objects are up to date
         run: git diff --exit-code -- internal/bpf/
+
   worker:
     name: Worker syntax check
     runs-on: ubuntu-latest
