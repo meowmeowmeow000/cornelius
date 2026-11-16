@@ -1,22 +1,19 @@
 package proxy
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
-	"encoding/binary"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
+	"cornelius/internal/mockworker"
 	"cornelius/internal/proxy/factory"
 )
 
@@ -26,171 +23,17 @@ import (
 // cannot import them.
 const testECHBase64 = "AEX+DQBBZQAgACAOj1t+953ib/8pSWcLg5LSAYErxMb1kJVE0R3m/XdmagAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
 
-// readWSFrame reads one WebSocket frame. Client frames are masked;
-// server frames are not.
-func readWSFrame(br *bufio.Reader) ([]byte, error) {
-	hdr := make([]byte, 2)
-	if _, err := io.ReadFull(br, hdr); err != nil {
-		return nil, err
-	}
-	masked := hdr[1]&0x80 != 0
-	length := int64(hdr[1] & 0x7f)
-	switch length {
-	case 126:
-		var ext [2]byte
-		if _, err := io.ReadFull(br, ext[:]); err != nil {
-			return nil, err
-		}
-		length = int64(binary.BigEndian.Uint16(ext[:]))
-	case 127:
-		var ext [8]byte
-		if _, err := io.ReadFull(br, ext[:]); err != nil {
-			return nil, err
-		}
-		length = int64(binary.BigEndian.Uint64(ext[:]))
-	}
-	var mask [4]byte
-	if masked {
-		if _, err := io.ReadFull(br, mask[:]); err != nil {
-			return nil, err
-		}
-	}
-	payload := make([]byte, length)
-	if _, err := io.ReadFull(br, payload); err != nil {
-		return nil, err
-	}
-	if masked {
-		for i := range payload {
-			payload[i] ^= mask[i%4]
-		}
-	}
-	return payload, nil
-}
-
-// writeWSFrame writes one unmasked server binary frame.
-func writeWSFrame(w io.Writer, payload []byte) error {
-	var hdr []byte
-	hdr = append(hdr, 0x82)
-	switch {
-	case len(payload) < 126:
-		hdr = append(hdr, byte(len(payload)))
-	case len(payload) <= 0xffff:
-		hdr = append(hdr, 126, byte(len(payload)>>8), byte(len(payload)))
-	default:
-		hdr = append(hdr, 127)
-		var ext [8]byte
-		binary.BigEndian.PutUint64(ext[:], uint64(len(payload)))
-		hdr = append(hdr, ext[:]...)
-	}
-	if _, err := w.Write(hdr); err != nil {
-		return err
-	}
-	_, err := w.Write(payload)
-	return err
-}
-
 // relayFakeWorker answers the WebSocket upgrade, then relays every SMUX
 // stream to targetAddr — a small stand-in for worker/worker.js, which
 // dials the target from the stream's target header. Here every stream
 // goes to the same test DoH server, which is all the test needs: the
 // point is proving bytes flow session -> stream -> relay -> DoH server
-// and back, not the Worker's target selection.
+// and back, not the Worker's target selection. The relay itself lives in
+// internal/mockworker now, so this is the same fake the end-to-end tests
+// use — not a second one.
 func relayFakeWorker(t *testing.T, server net.Conn, targetAddr string) {
 	t.Helper()
-	br := bufio.NewReader(server)
-	var writeMu sync.Mutex
-	streams := map[uint32]net.Conn{}
-	var streamsMu sync.Mutex
-	go func() {
-		defer server.Close()
-		for {
-			line, err := br.ReadString('\n')
-			if err != nil {
-				return
-			}
-			if line == "\r\n" || line == "\n" {
-				break
-			}
-		}
-		_, _ = server.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
-		var rxBuf []byte
-		for {
-			msg, err := readWSFrame(br)
-			if err != nil {
-				return
-			}
-			rxBuf = append(rxBuf, msg...)
-			for len(rxBuf) >= smuxHdrSize {
-				if rxBuf[0] != smuxVersion {
-					return
-				}
-				cmd := rxBuf[1]
-				length := int(binary.LittleEndian.Uint16(rxBuf[2:4]))
-				streamID := binary.LittleEndian.Uint32(rxBuf[4:8])
-				if len(rxBuf) < smuxHdrSize+length {
-					break
-				}
-				payload := append([]byte(nil), rxBuf[smuxHdrSize:smuxHdrSize+length]...)
-				rxBuf = rxBuf[smuxHdrSize+length:]
-				switch cmd {
-				case cmdSYN: // nothing to do until the target header arrives
-				case cmdPSH:
-					streamsMu.Lock()
-					target, ok := streams[streamID]
-					streamsMu.Unlock()
-					if !ok {
-						// First PSH carries the target header.
-						if len(payload) < 3 {
-							continue
-						}
-						target, err = net.Dial("tcp", targetAddr)
-						if err != nil {
-							return
-						}
-						streamsMu.Lock()
-						streams[streamID] = target
-						streamsMu.Unlock()
-						go func(id uint32, tc net.Conn) {
-							defer tc.Close()
-							buf := make([]byte, 16384)
-							for {
-								n, err := tc.Read(buf)
-								if n > 0 {
-									frame := make([]byte, smuxHdrSize+n)
-									frame[0] = smuxVersion
-									frame[1] = cmdPSH
-									binary.LittleEndian.PutUint16(frame[2:4], uint16(n))
-									binary.LittleEndian.PutUint32(frame[4:8], id)
-									copy(frame[smuxHdrSize:], buf[:n])
-									writeMu.Lock()
-									werr := writeWSFrame(server, frame)
-									writeMu.Unlock()
-									if werr != nil {
-										return
-									}
-								}
-								if err != nil {
-									return
-								}
-							}
-						}(streamID, target)
-						continue
-					}
-					if _, err := target.Write(payload); err != nil {
-						return
-					}
-				case cmdFIN:
-					streamsMu.Lock()
-					if target, ok := streams[streamID]; ok {
-						_ = target.Close()
-						delete(streams, streamID)
-					}
-					streamsMu.Unlock()
-				case cmdNOP: // keepalive — ignore
-				}
-			}
-		}
-	}()
+	go mockworker.ServeConn(server, targetAddr, mockworker.DefaultWSPath)
 }
 
 // doWSUpgrade performs the client side of the WebSocket upgrade, the way

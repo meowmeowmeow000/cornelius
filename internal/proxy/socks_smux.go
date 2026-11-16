@@ -374,7 +374,20 @@ func (st *smuxStream) Close() error {
 		st.sess.mu.Lock()
 		delete(st.sess.streams, st.id)
 		st.sess.mu.Unlock()
-		_ = st.sess.sendFrame(cmdFIN, st.id, nil)
+		// Best-effort FIN: send it from a goroutine so Close() never
+		// blocks on the network. WriteBinary holds writeMu across a
+		// blocking raw Write, so a synchronous FIN to a peer that
+		// stopped reading with a full send buffer would wedge closeOnce
+		// (any concurrent Close waits on it) and writeMu (no more frames,
+		// including keepalives, could go out on that session). The FIN is
+		// a courtesy — the peer reaps the stream on session close or
+		// silence — and a stuck FIN unblocks when the session closes the
+		// connection, or when the keepalive reaps the silent session
+		// after 25 s (that path needs no writeMu). A session that is
+		// already closed gets no FIN at all.
+		if !st.sess.closed.Load() {
+			go st.sess.sendFrame(cmdFIN, st.id, nil)
+		}
 	})
 	return nil
 }
