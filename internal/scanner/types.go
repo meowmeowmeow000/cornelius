@@ -40,12 +40,19 @@ type ProbeResult struct {
 	WSVerified  bool          `json:"ws_verified"`
 	Latency     time.Duration `json:"latency_ns"`
 	ErrStr      string        `json:"error,omitempty"`
+	// VerifyErr names why the tunnel verification failed, when it did:
+	// "" (ok), "upgrade" (no WebSocket 101), "no-traffic" (upgraded but
+	// no SMUX echo before the deadline — handshake ok, no traffic),
+	// "closed" (connection error after the upgrade). Empty when the probe
+	// did not attempt verification (no WSPath).
+	VerifyErr string `json:"verify_error,omitempty"`
 }
 
 type IntelligenceReport struct {
 	Timestamp     time.Time     `json:"timestamp"`
 	WorkerHost    string        `json:"worker_host"`
 	SpoofHost     string        `json:"spoof_host,omitempty"`
+	ScanMode      string        `json:"scan_mode,omitempty"`
 	TotalScanned  int           `json:"completed_probes"`
 	SuccessfulTLS int           `json:"successful_tls_handshakes"`
 	CleanEdges    []ProbeResult `json:"verified_tls_endpoints"`

@@ -67,7 +67,19 @@ instead of a raw ELF failure.
 - **Verified routes** (`internal/scanner`): the Cartographer promotes only
   edges that prove the full path — TLS handshake *plus* WebSocket upgrade
   *plus* a SMUX keepalive echo. A fast edge that cannot upgrade never
-  becomes primary.
+  becomes primary. The echo is re-sent every 700 ms until two arrive —
+  one lost packet used to cost the whole probe — and a route that
+  handshakes but passes no traffic is reported as such (`verify_error:
+  "no-traffic"`) instead of looking like a handshake failure.
+  - **Scan modes** (`-scan-mode`, default `balanced`): `turbo` takes the
+    first working gateway and stops; `balanced` collects six successes,
+    then waits a 20 s quiet window in case a faster one shows up;
+    `verified` is balanced with a shorter window; `thorough` sweeps
+    everything; `ironclad` goes slow (4 concurrent, 15 s probes) for
+    when nothing else works. Concurrency is capped by a resource tier
+    (≤2 CPUs: 4, ≤4 CPUs: 10, otherwise the mode's value, hard ceiling
+    32). A `lastgood.json` ring beside the combat.profile remembers the
+    last eight working gateways and tries them before any cold sweep.
 - **Encrypted ClientHello** (`internal/proxy/factory`, `ech_enabled` in the
   profile): the dialer fetches the Worker's ECH config from its DNS HTTPS
   record over DoH and hides the SNI entirely — the outer hello carries
