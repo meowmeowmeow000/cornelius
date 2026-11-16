@@ -9,23 +9,89 @@
 - **Doctor panel (`[d]`):** Live health checks inside the TUI — profile, WebSocket path, SNI direction, ECH status, warm tunnels, dial failures — refreshed while open. The route matrix also shows a WS column (✓ = the edge proved the full WebSocket + SMUX tunnel, – = TLS only).
 - **4 Live `btop` Themes (`[m]`):** Cycle between *Emerald Matrix*, *Cyberpunk Neon*, *Nordic Frost*, and *Amber Phosphor*.
 
-## Build & Run
+## Install
+
+There are no releases yet — install from source. Everything below runs
+on Linux. The tunnel itself needs no special privileges; the XDP shield
+(`-i`) needs root.
+
+### Prerequisites
+
+- Go 1.24.2 (`go.mod` pins the version; CI builds with 1.24.2)
+- git
+- Node.js, for `npx wrangler` (the Worker deploy)
+- Only if you change `xdp_filter.c`: `clang`, `llvm`, `libbpf-dev`
+  (`make ebpf`). A first build does not need them — the compiled eBPF
+  objects are committed to the repo.
+
+### Build
 
 ```bash
-unzip cornelius-v1.3.2-art-tui.zip
+git clone https://github.com/meowmeowmeow000/cornelius.git
 cd cornelius
+make all   # builds bin/cornelius and bin/cornelius-tui
+```
 
-go mod tidy
-make ebpf
-make all
+### Deploy the Worker first
 
-# Terminal 1: Start Cornelius Daemon
+The daemon tunnels through a Cloudflare Worker (`worker/`). Deploy it
+before starting the daemon:
+
+```bash
+cd worker
+npx wrangler login   # first time only; needs a Cloudflare account
+npx wrangler deploy
+```
+
+It deploys to `<name>.<subdomain>.workers.dev`. Put that hostname in
+`worker_host` in `configs/combat.profile` (and the root
+`combat.profile`), and make sure `WS_PATH` in `wrangler.toml` matches
+`default_ws_path` in the profiles (default `/secret-knock-99` in both).
+See `worker/README.md` for the full deploy guide.
+
+### Run
+
+```bash
+# Terminal 1: start the daemon (without -i the tunnel runs without the XDP shield)
+sudo ./bin/cornelius -c configs/combat.profile
+
+# With the XDP shield (needs root and an interface):
 IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
-sudo ./bin/cornelius -i "$IFACE" -c configs/combat.profile -l 127.0.0.1:40443
+sudo ./bin/cornelius -i "$IFACE" -c configs/combat.profile
 
-# Terminal 2: Launch Tactical TUI
+# Terminal 2: launch the tactical TUI
 sudo ./bin/cornelius-tui -s /run/cornelius/ipc.sock
 ```
+
+The daemon listens on two local ports: SOCKS5 on `127.0.0.1:10808`
+(point your apps — or `curl -x socks5h://127.0.0.1:10808` — at it)
+and a raw TCP forward on `127.0.0.1:40443` (`-l` changes it) for
+Trojan/V2Ray-style clients. `-scan-mode` picks the gateway scan strategy
+(`turbo`, `balanced`, `thorough`, `verified`, `ironclad`; default
+`balanced` — see Advanced evasion).
+
+### Verify it works
+
+```bash
+sudo ./bin/cornelius -c configs/combat.profile doctor
+curl -x socks5h://127.0.0.1:10808 https://example.com
+```
+
+`doctor` checks the profile, the tunnel and a real end-to-end stream,
+and exits 0 when healthy. If it reports a problem, start there — see
+Doctor below.
+
+### Rebuilding the XDP program
+
+The compiled eBPF program (`internal/bpf/*.o`, embedded into the
+binary by `bpf2go`) is committed to the repo. If you change
+`xdp_filter.c`, regenerate it with `make ebpf` (needs `clang`,
+`llvm` and `libbpf-dev`) and commit the result — CI verifies the
+committed artifacts match the C source, and a test
+(`internal/bpf/loader_test.go`) fails loudly if the artifacts are
+ever empty again. The daemon also checks the embedded program at
+startup when `-i` is given and refuses to start with a clear error
+instead of a raw ELF failure.
 
 ## Doctor
 
@@ -46,18 +112,6 @@ no primary target), instead of starting a daemon whose every dial is
 doomed. Warnings (ECH off, fronting direction) are logged but never
 block startup. A profile file that fails to load at all still starts
 empty and waits for routes over IPC, as before.
-
-### Rebuilding the XDP program
-
-The compiled eBPF program (`internal/bpf/*.o`, embedded into the
-binary by `bpf2go`) is committed to the repo. If you change
-`xdp_filter.c`, regenerate it with `make ebpf` (needs `clang`,
-`llvm` and `libbpf-dev`) and commit the result — CI verifies the
-committed artifacts match the C source, and a test
-(`internal/bpf/loader_test.go`) fails loudly if the artifacts are
-ever empty again. The daemon also checks the embedded program at
-startup when `-i` is given and refuses to start with a clear error
-instead of a raw ELF failure.
 
 ## Advanced evasion
 
@@ -132,9 +186,24 @@ over a WebSocket at the secret path — the protocol is specified in
 `npx wrangler deploy` from `worker/`; the path in `wrangler.toml` (`WS_PATH`)
 must match `default_ws_path` in the combat profiles.
 
+## Testing
+
+```bash
+go test ./...        # full suite
+go test -race ./...  # race detector, also run by CI
+```
+
+The suite is hermetic: the end-to-end test dials a fake Worker
+(`internal/mockworker`, the same SMUX v1 protocol as
+`worker/worker.js`) on 127.0.0.1, so it needs no real network, no root
+and no eBPF. What the suite cannot prove — the real Worker, real edge
+IPs and ECH acceptance by Cloudflare — still needs `cornelius doctor`
+on a real machine.
+
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull
-request: `gofmt` + `go vet` + `go build` + `go test`, a check that the
-committed eBPF objects match `xdp_filter.c`, and a `node --check` of the
-Worker.
+request: `gofmt` + `go vet` + `go build` + `go test` + `go test -race ./...`,
+a check that the committed eBPF objects match `xdp_filter.c`, and a
+`node --check` of the Worker. The test run includes the hermetic
+end-to-end test against the fake Worker (see Testing).
