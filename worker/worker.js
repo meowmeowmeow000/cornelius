@@ -81,21 +81,29 @@ export default {
       if (code !== "silent") sendFrame(CMD_FIN, id, new Uint8Array(0));
     };
 
-    const pumpSocketToClient = async (id, socket) => {
+    const pumpSocketToClient = async (id, socket, target) => {
       const reader = socket.readable.getReader();
+      let bytes = 0;
+      let outcome = "closed-clean";
       try {
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
           const chunk = new Uint8Array(value);
+          bytes += chunk.length;
           for (let off = 0; off < chunk.length; off += MAX_CHUNK) {
             sendFrame(CMD_PSH, id, chunk.slice(off, off + MAX_CHUNK));
           }
         }
-      } catch {
-        // Socket error: fall through to FIN.
+      } catch (e) {
+        // Diagnostic: the pump used to swallow this silently, so a dead
+        // egress socket looked exactly like a dead tunnel. Log how the
+        // socket ended and how much it forwarded, so `wrangler tail`
+        // shows the real reason.
+        outcome = "error: " + (e && e.message ? e.message : e);
       } finally {
         reader.releaseLock();
+        console.error("cornelius pump ended:", target.host, target.port, "bytes=" + bytes, outcome);
         closeStream(id);
       }
     };
@@ -121,9 +129,12 @@ export default {
       if (target.rest.length > 0) {
         st.writeQueue = st.writeQueue
           .then(() => st.writer.write(target.rest))
-          .catch(() => closeStream(id));
+          .catch((e) => {
+            console.error("cornelius target write failed:", target.host, target.port, e && e.message ? e.message : e);
+            closeStream(id);
+          });
       }
-      ctx.waitUntil(pumpSocketToClient(id, socket));
+      ctx.waitUntil(pumpSocketToClient(id, socket, target));
     };
 
     const handleFrame = (cmd, streamId, payload) => {
@@ -157,7 +168,10 @@ export default {
             const data = payload;
             st.writeQueue = st.writeQueue
               .then(() => st.writer.write(data))
-              .catch(() => closeStream(streamId));
+              .catch((e) => {
+                console.error("cornelius stream write failed:", st.target.host, st.target.port, e && e.message ? e.message : e);
+                closeStream(streamId);
+              });
           }
           break;
         }
