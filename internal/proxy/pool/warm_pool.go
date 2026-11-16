@@ -63,6 +63,12 @@ func NewWarmPool(profile *config.CombatProfile) *WarmPool {
 		echConfigB64 = profile.Modules.StealthFactory.ECHConfigB64
 	}
 
+	// The context starts live here, not in Start(): HandleLocalConnection
+	// (and Close) must be safe on a pool that was never started, and a
+	// nil context panics in WithTimeout. Start() replaces it with a
+	// parent-derived one; the dropped cancel is harmless (WithCancel
+	// spawns no goroutine).
+	ctx, cancel := context.WithCancel(context.Background())
 	return &WarmPool{
 		profile:      profile,
 		activeRoute:  primary,
@@ -76,6 +82,8 @@ func NewWarmPool(profile *config.CombatProfile) *WarmPool {
 		defaultWS:    defaultWS,
 		capacity:     capSize,
 		pipes:        make(chan net.Conn, capSize),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 }
 
@@ -168,6 +176,15 @@ func (p *WarmPool) ActiveRoute() config.RouteCandidate {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.activeRoute
+}
+
+// FailoverCount returns the number of routes in the failover ring. The
+// strategist uses it to decide whether a rotation is possible; it counts
+// the ring itself, not the deduplicated AllRoutes view.
+func (p *WarmPool) FailoverCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.failovers)
 }
 
 func (p *WarmPool) AllRoutes() []config.RouteCandidate {
