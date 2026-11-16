@@ -6,6 +6,9 @@ SMUX v1 protocol (see `PROTOCOL.md`).
 
 ## Deploy
 
+Needs Node.js and a Cloudflare account (`npx wrangler login` opens the
+browser the first time).
+
 ```bash
 cd worker
 npx wrangler login
@@ -22,6 +25,13 @@ a different name, update `worker_host` in `combat.profile` and
 `WS_PATH` in `wrangler.toml` (default `/secret-knock-99`) must match
 `modules.stealth_factory.default_ws_path` in the combat profiles. Requests
 to any other path get a plain 404. Rotate the path in both places at once.
+
+## ECH
+
+Nothing to configure on the Worker side: Cloudflare publishes an ECH
+config for the Worker hostname in DNS, and the daemon fetches it over
+DoH when ECH is enabled (see the main README). The Worker itself never
+sees the real SNI — it arrives encrypted inside the ClientHello.
 
 ## Test it
 
