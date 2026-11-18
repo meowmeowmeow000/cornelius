@@ -15,6 +15,7 @@ import (
 
 	"cornelius/internal/bpf"
 	"cornelius/internal/config"
+	"cornelius/internal/proxy/factory"
 )
 
 var FingerprintMap = map[string]utls.ClientHelloID{
@@ -88,8 +89,17 @@ func DialStealthProbe(ctx context.Context, task ProbeTask) (*ProbeResult, error)
 
 	wireConn := newStealthFragmentConn(rawConn, outerSNI, task.Mode)
 
+	// The probe verifies the WebSocket upgrade, so it needs the same
+	// http/1.1-only ALPN as the tunnel dial: a fingerprint that offers
+	// h2 negotiates h2, and the HTTP/1.1 upgrade over it dies with EOF.
+	// See factory.NewStealthUConn — setting NextProtos alone does not
+	// force it, the fingerprint's ALPN extension overwrites it.
 	tlsConfig := &utls.Config{ServerName: outerSNI}
-	uConn := utls.UClient(wireConn, tlsConfig, task.ClientHello)
+	uConn, err := factory.NewStealthUConn(wireConn, tlsConfig, task.ClientHello)
+	if err != nil {
+		res.ErrStr = fmt.Sprintf("could not build stealth connection: %v", err)
+		return res, err
+	}
 	if err := uConn.HandshakeContext(dialCtx); err != nil {
 		res.ErrStr = fmt.Sprintf("TLS handshake failed: %v", err)
 		return res, err

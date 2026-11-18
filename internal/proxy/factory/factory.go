@@ -230,7 +230,10 @@ func dialOnce(ctx context.Context, cfg StealthDialConfig, echList []byte, echPub
 		ServerName: serverName,
 		// Force HTTP/1.1 ALPN: the Chrome fingerprint advertises h2, but the
 		// WebSocket upgrade below is a raw HTTP/1.1 request. Negotiating h2
-		// makes Cloudflare reject the upgrade (200 OK / EOF).
+		// makes Cloudflare reject the upgrade (200 OK / EOF). Setting
+		// NextProtos here alone does NOT force it — the fingerprint's ALPN
+		// extension overwrites it — so NewStealthUConn rewrites the ALPN
+		// extension inside the fingerprint spec itself. See alpn.go.
 		NextProtos:                     []string{"http/1.1"},
 		InsecureSkipVerify:             cfg.AllowInsec,
 		EncryptedClientHelloConfigList: echList,
@@ -238,7 +241,11 @@ func dialOnce(ctx context.Context, cfg StealthDialConfig, echList []byte, echPub
 	if cfg.ECHRejectionVerify != nil {
 		tlsCfg.EncryptedClientHelloRejectionVerify = cfg.ECHRejectionVerify
 	}
-	uConn := utls.UClient(wrapped, tlsCfg, PickFingerprint(cfg.Route.Fingerprint))
+	uConn, err := NewStealthUConn(wrapped, tlsCfg, PickFingerprint(cfg.Route.Fingerprint))
+	if err != nil {
+		_ = rawConn.Close()
+		return nil, err
+	}
 	if err := uConn.HandshakeContext(ctx); err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("uTLS handshake failed (dir=%s outer=%s): %w", dir, outerSNI, err)
