@@ -291,14 +291,14 @@ func RunDoctor(ctx context.Context, profilePath, iface string) int {
 	defer sess.Close()
 	streamCtx, streamCancel := context.WithTimeout(dialCtx, 15*time.Second)
 	defer streamCancel()
-	st, err := sess.OpenStream(streamCtx, "example.com", 80)
+	st, err := sess.OpenStream(streamCtx, "ident.me", 80)
 	if err != nil {
 		printCheck(HealthCheck{"a real stream works end to end", "fail", "could not open a stream: " + err.Error()})
 		fmt.Println("\nDoctor: FAILED — the tunnel is up but streams do not work. Check the Worker's SMUX handling.")
 		return 1
 	}
 	defer st.Close()
-	_, _ = st.Write([]byte("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n"))
+	_, _ = st.Write([]byte("GET / HTTP/1.0\r\nHost: ident.me\r\n\r\n"))
 	buf := make([]byte, 4096)
 	type readResult struct {
 		n   int
@@ -326,7 +326,7 @@ func RunDoctor(ctx context.Context, profilePath, iface string) int {
 		fmt.Println("\nDoctor: FAILED — the tunnel is up but streams do not work. Check the Worker's SMUX handling.")
 		return 1
 	}
-	printCheck(HealthCheck{"a real stream works end to end", "ok", "fetched example.com through the tunnel, got " + strings.TrimSpace(strings.SplitN(string(buf[:n]), "\r\n", 2)[0])})
+	printCheck(HealthCheck{"a real stream works end to end", "ok", "fetched ident.me through the tunnel, got " + strings.TrimSpace(strings.SplitN(string(buf[:n]), "\r\n", 2)[0])})
 
 	// ECH refresh through the tunnel: reuse this session to fetch the
 	// Worker's ECH config through the tunnel itself, the way the
