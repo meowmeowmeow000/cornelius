@@ -10,11 +10,11 @@ import (
 
 // TestStreamCloseNeverBlocksOnDeadPeer is a regression test for the
 // deadlock the race detector found in round 12: smuxStream.Close()
-// sent the FIN synchronously, and WriteBinary holds writeMu across a
+// sent the close frame synchronously, and WriteBinary holds writeMu across a
 // blocking raw Write. To a peer that stopped reading with a full send
 // buffer, Close() blocked forever — wedging closeOnce (any concurrent
 // Close waits on it) and writeMu (no more frames, including keepalives,
-// could go out on that session). The FIN is now best-effort (sent from
+// could go out on that session). The RST is now best-effort (sent from
 // a goroutine), so Close() must return promptly even when the peer
 // never reads.
 func TestStreamCloseNeverBlocksOnDeadPeer(t *testing.T) {
@@ -48,9 +48,9 @@ func TestStreamCloseNeverBlocksOnDeadPeer(t *testing.T) {
 	}
 }
 
-// TestStreamCloseSendsFINWhenPeerReads proves the async FIN is not
+// TestStreamCloseSendsRSTWhenPeerReads proves the async RST (full close) is not
 // dropped: when the peer is reading, the frame must still arrive.
-func TestStreamCloseSendsFINWhenPeerReads(t *testing.T) {
+func TestStreamCloseSendsRSTWhenPeerReads(t *testing.T) {
 	client, server := net.Pipe()
 	defer server.Close()
 	sess := newSmuxSession(client)
@@ -69,7 +69,7 @@ func TestStreamCloseSendsFINWhenPeerReads(t *testing.T) {
 	_ = server.SetReadDeadline(time.Now().Add(2 * time.Second))
 	frame := make([]byte, 14)
 	if _, err := io.ReadFull(server, frame); err != nil {
-		t.Fatalf("reading the FIN frame: %v", err)
+		t.Fatalf("reading the RST frame: %v", err)
 	}
 	if frame[0] != 0x82 || frame[1] != 0x80|8 {
 		t.Fatalf("frame header = %x, want a masked 8-byte binary frame", frame[:2])
@@ -79,10 +79,10 @@ func TestStreamCloseSendsFINWhenPeerReads(t *testing.T) {
 	for i := range payload {
 		payload[i] = frame[6+i] ^ mask[i&3]
 	}
-	if payload[0] != smuxVersion || payload[1] != cmdFIN {
-		t.Fatalf("SMUX header = %x, want version %d cmd FIN (%d)", payload[:2], smuxVersion, cmdFIN)
+	if payload[0] != smuxVersion || payload[1] != cmdRST {
+		t.Fatalf("SMUX header = %x, want version %d cmd RST (%d)", payload[:2], smuxVersion, cmdRST)
 	}
 	if got := binary.LittleEndian.Uint32(payload[4:8]); got != 2 {
-		t.Fatalf("FIN stream id = %d, want 2", got)
+		t.Fatalf("RST stream id = %d, want 2", got)
 	}
 }
