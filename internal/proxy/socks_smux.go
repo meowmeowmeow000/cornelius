@@ -23,6 +23,7 @@ const (
 	cmdFIN      = 1
 	cmdPSH      = 2
 	cmdNOP      = 3
+	cmdRST      = 4 // full close of both directions; FIN (1) is half-close only
 	smuxHdrSize = 8
 	maxChunk    = 16384
 )
@@ -235,6 +236,17 @@ func (s *smuxSession) readLoop() {
 					}
 				}
 			case cmdFIN:
+				// Half-close: the peer will send no more data. Only the
+				// read side hits EOF; the stream stays registered so our
+				// write side keeps working until Close() (or RST).
+				s.mu.RLock()
+				st := s.streams[streamID]
+				s.mu.RUnlock()
+				if st != nil {
+					st.closeRead()
+				}
+			case cmdRST:
+				// Full close: both directions are dead, forget the stream.
 				s.mu.Lock()
 				st := s.streams[streamID]
 				delete(s.streams, streamID)
@@ -258,10 +270,11 @@ func (s *smuxSession) OpenStream(ctx context.Context, host string, port uint16) 
 
 	id := atomic.AddUint32(&s.nextID, 2) - 2
 	st := &smuxStream{
-		sess: s,
-		id:   id,
-		rxCh: make(chan []byte, 64),
-		done: make(chan struct{}),
+		sess:  s,
+		id:    id,
+		rxCh:  make(chan []byte, 64),
+		done:  make(chan struct{}),
+		rxEOF: make(chan struct{}),
 	}
 
 	s.mu.Lock()
@@ -310,13 +323,26 @@ func (s *smuxSession) Close() {
 	})
 }
 
+// smuxStream is one multiplexed stream. Its two directions are
+// independent (see worker/PROTOCOL.md):
+//
+//   - read side: ends on the peer's FIN (rxEOF) — Read drains buffered
+//     data, then returns io.EOF — or on a full close (done).
+//   - write side: ends on CloseWrite() (we sent FIN); Write then fails.
+//
+// Close() is the full close: it ends both directions and sends RST.
 type smuxStream struct {
 	sess      *smuxSession
 	id        uint32
 	rxCh      chan []byte
 	pending   []byte
-	done      chan struct{}
+	done      chan struct{} // full close (Close, peer RST, session death)
+	rxEOF     chan struct{} // peer half-closed (FIN): no more data will arrive
+	wmu       sync.Mutex    // serialises Write against the CloseWrite FIN
 	closeOnce sync.Once
+	eofOnce   sync.Once
+	wcOnce    sync.Once
+	wClosed   atomic.Bool // our write side is closed (FIN sent or Close)
 }
 
 func (st *smuxStream) Read(p []byte) (int, error) {
@@ -333,22 +359,34 @@ func (st *smuxStream) Read(p []byte) (int, error) {
 		}
 		return n, nil
 	case <-st.done:
-		select {
-		case chunk := <-st.rxCh:
-			n := copy(p, chunk)
-			if n < len(chunk) {
-				st.pending = chunk[n:]
-			}
-			return n, nil
-		default:
-			return 0, io.EOF
+	case <-st.rxEOF:
+	}
+	// Closed or half-closed by the peer: drain what was already buffered
+	// (the readLoop enqueues every PSH before it processes the FIN), then
+	// report EOF.
+	select {
+	case chunk := <-st.rxCh:
+		n := copy(p, chunk)
+		if n < len(chunk) {
+			st.pending = chunk[n:]
 		}
+		return n, nil
+	default:
+		return 0, io.EOF
 	}
 }
 
 func (st *smuxStream) Write(p []byte) (int, error) {
+	// wmu orders every PSH before the FIN that CloseWrite sends: the FIN
+	// goroutine takes the same lock, and the closed check is repeated per
+	// chunk under it, so no PSH can follow a FIN.
+	st.wmu.Lock()
+	defer st.wmu.Unlock()
 	total := 0
 	for len(p) > 0 {
+		if st.wClosed.Load() {
+			return total, io.ErrClosedPipe
+		}
 		chunk := p
 		if len(chunk) > maxChunk {
 			chunk = p[:maxChunk]
@@ -359,34 +397,96 @@ func (st *smuxStream) Write(p []byte) (int, error) {
 		total += len(chunk)
 		p = p[len(chunk):]
 	}
+	if st.wClosed.Load() && total == 0 {
+		return 0, io.ErrClosedPipe
+	}
 	return total, nil
 }
 
+// closeLocal is the full close driven by the peer (RST) or the session:
+// no frame is sent back.
 func (st *smuxStream) closeLocal() {
 	st.closeOnce.Do(func() {
 		close(st.done)
 	})
 }
 
+// closeRead records the peer's FIN: the read side hits EOF once the
+// buffered data is drained, while the write side stays usable.
+func (st *smuxStream) closeRead() {
+	st.eofOnce.Do(func() {
+		if st.rxEOF != nil {
+			close(st.rxEOF)
+		}
+	})
+}
+
+// CloseWrite half-closes the stream: it tells the peer (FIN) that no more
+// data will be sent, but keeps the read side open so the peer's reply can
+// still be received. It is the smux equivalent of (*net.TCPConn).CloseWrite.
+//
+// It never blocks on the network. Like Close(), the frame is sent from a
+// goroutine: WriteBinary holds the session's writeMu across a blocking raw
+// Write, so a synchronous FIN to a peer that stopped reading with a full
+// send buffer would block the caller forever (in the SOCKS handler that
+// leaks the goroutine and wedges wg.Wait()). The write side is marked
+// closed immediately, so a Write after CloseWrite fails at once. The FIN
+// goroutine takes wmu, so it is ordered after any Write already in
+// progress; a FIN stuck behind a dead peer unblocks when the session
+// closes the connection (or the keepalive reaps the silent session).
+// Trade-off: CloseWrite always returns nil — a FIN that fails to send is
+// not reported to the caller; the session teardown reports it instead.
+func (st *smuxStream) CloseWrite() error {
+	st.wcOnce.Do(func() {
+		st.wClosed.Store(true)
+		select {
+		case <-st.done:
+			return // already fully closed; nothing to tell the peer
+		default:
+		}
+		if st.sess.closed.Load() {
+			return
+		}
+		go func() {
+			st.wmu.Lock()
+			defer st.wmu.Unlock()
+			_ = st.sess.sendFrame(cmdFIN, st.id, nil)
+		}()
+	})
+	return nil
+}
+
+// Close fully closes the stream in both directions and sends RST. If both
+// halves already finished gracefully (we sent FIN, the peer sent FIN) no
+// RST is needed.
 func (st *smuxStream) Close() error {
 	st.closeOnce.Do(func() {
 		close(st.done)
 		st.sess.mu.Lock()
 		delete(st.sess.streams, st.id)
 		st.sess.mu.Unlock()
-		// Best-effort FIN: send it from a goroutine so Close() never
+		bothHalvesDone := st.wClosed.Load()
+		if bothHalvesDone {
+			select {
+			case <-st.rxEOF:
+			default:
+				bothHalvesDone = false
+			}
+		}
+		st.wClosed.Store(true)
+		// Best-effort RST: send it from a goroutine so Close() never
 		// blocks on the network. WriteBinary holds writeMu across a
-		// blocking raw Write, so a synchronous FIN to a peer that
+		// blocking raw Write, so a synchronous frame to a peer that
 		// stopped reading with a full send buffer would wedge closeOnce
 		// (any concurrent Close waits on it) and writeMu (no more frames,
-		// including keepalives, could go out on that session). The FIN is
+		// including keepalives, could go out on that session). The RST is
 		// a courtesy — the peer reaps the stream on session close or
-		// silence — and a stuck FIN unblocks when the session closes the
+		// silence — and a stuck RST unblocks when the session closes the
 		// connection, or when the keepalive reaps the silent session
 		// after 25 s (that path needs no writeMu). A session that is
-		// already closed gets no FIN at all.
-		if !st.sess.closed.Load() {
-			go st.sess.sendFrame(cmdFIN, st.id, nil)
+		// already closed gets no RST at all.
+		if !bothHalvesDone && !st.sess.closed.Load() {
+			go st.sess.sendFrame(cmdRST, st.id, nil)
 		}
 	})
 	return nil
@@ -549,17 +649,35 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 
 	var wg sync.WaitGroup
 	wg.Add(2)
+	var lastStreamRx atomic.Int64
+	lastStreamRx.Store(time.Now().UnixNano())
+	replyDone := make(chan struct{}) // closed when io.Copy(client, stream) ends
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(stream, client)
+		n, err := io.Copy(stream, client)
 		if n > 0 {
 			telemetry.TotalBytesTx.Add(uint64(n))
 		}
-		_ = stream.Close()
+		if err != nil {
+			// The client reset or the stream died: nothing more can be
+			// delivered in either direction, so tear the stream down.
+			_ = stream.Close()
+			return
+		}
+		// Clean EOF from the client: it finished sending. Half-close
+		// only the write side so the target's reply can still arrive
+		// and io.Copy(client, stream) below can complete. The deferred
+		// stream.Close() does the full close once both copies end.
+		_ = stream.CloseWrite()
+		// The client can no longer send, and TCP gives us no signal when
+		// it later closes (a FIN-then-close is silent). Watch for it so a
+		// target that never EOFs (HTTP keep-alive) cannot pin this stream.
+		watchHalfClosedClient(client, stream, &lastStreamRx, replyDone)
 	}()
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(client, stream)
+		defer close(replyDone)
+		n, _ := io.Copy(client, &activityReader{r: stream, last: &lastStreamRx})
 		if n > 0 {
 			telemetry.TotalBytesRx.Add(uint64(n))
 		}
@@ -568,4 +686,63 @@ func handleSOCKS5Client(parentCtx context.Context, client net.Conn, mgr *smuxMan
 		}
 	}()
 	wg.Wait()
+}
+
+// halfCloseIdleNanos bounds how long a stream whose client has half-closed
+// may sit with no data arriving from the target before the stream is fully
+// closed. It must stay well under the 25 s session keepalive. A var (atomic)
+// so tests can shorten it.
+var halfCloseIdleNanos atomic.Int64
+
+func init() { halfCloseIdleNanos.Store(int64(15 * time.Second)) }
+
+// activityReader records when the stream last delivered data.
+type activityReader struct {
+	r    io.Reader
+	last *atomic.Int64
+}
+
+func (a *activityReader) Read(p []byte) (int, error) {
+	n, err := a.r.Read(p)
+	if n > 0 {
+		a.last.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+// watchHalfClosedClient runs after the client half-closed. It fully closes
+// the stream when the client is gone, which unblocks io.Copy(client, stream):
+//
+//   - the client socket reports an error (RST from an abortive close, or a
+//     keepalive failure) — checked via SO_ERROR; or
+//   - nothing has arrived from the target for halfCloseIdleNanos. This is
+//     the only way to notice a plain close: after shutdown(SHUT_WR) the
+//     kernel emits nothing further when the client closes, and the proxy
+//     has nothing it could write to probe. Trade-off: a target that stays
+//     silent longer than the timeout gets cut after a client half-close.
+//
+// It returns as soon as the reply direction ends (done is closed).
+func watchHalfClosedClient(client net.Conn, stream *smuxStream, last *atomic.Int64, done <-chan struct{}) {
+	timeout := time.Duration(halfCloseIdleNanos.Load())
+	interval := timeout / 4
+	if interval < 20*time.Millisecond {
+		interval = 20 * time.Millisecond
+	}
+	if interval > time.Second {
+		interval = time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+			idle := timeout > 0 && time.Since(time.Unix(0, last.Load())) > timeout
+			if idle || clientSocketFailed(client) {
+				_ = stream.Close()
+				return
+			}
+		}
+	}
 }

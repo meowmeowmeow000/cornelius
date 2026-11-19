@@ -16,6 +16,7 @@ const CMD_SYN = 0;
 const CMD_FIN = 1;
 const CMD_PSH = 2;
 const CMD_NOP = 3;
+const CMD_RST = 4;
 const SMUX_HDR_SIZE = 8;
 const MAX_CHUNK = 16384;
 
@@ -70,18 +71,54 @@ export default {
       }
     };
 
+    // FIN is a HALF-close (see PROTOCOL.md). A stream has two independent
+    // halves: the write side (client -> target) ends on a client FIN, the
+    // read side (target -> client) ends when the socket's readable pump
+    // ends and we send FIN back. The stream is reaped once both are done.
+    const finishIfDone = (id, st) => {
+      if (!st.readDone || !st.writeClosed) return;
+      if (streams.get(id) !== st) return;
+      streams.delete(id);
+      st.closed = true;
+      try {
+        if (st.socket) st.socket.close();
+      } catch {}
+    };
+
+    // Full close of both halves (RST). Sends RST to the client unless the
+    // close was driven by the client itself (code === "silent").
     const closeStream = (id, code) => {
       const st = streams.get(id);
       if (!st) return;
       streams.delete(id);
       st.closed = true;
       try {
-        st.socket.close();
+        if (st.socket) st.socket.close();
       } catch {}
-      if (code !== "silent") sendFrame(CMD_FIN, id, new Uint8Array(0));
+      if (code !== "silent") sendFrame(CMD_RST, id, new Uint8Array(0));
     };
 
-    const pumpSocketToClient = async (id, socket, target) => {
+    // Client FIN: close ONLY the write side of the target socket, after any
+    // queued writes have been flushed. Cloudflare Sockets has no
+    // socket.closeWrite(); the documented way is writer.close() on
+    // socket.writable. socket.readable keeps pumping to the client.
+    const halfCloseWrite = (id, st) => {
+      if (st.writeClosed || st.finRequested) return;
+      st.finRequested = true;
+      if (!st.writer) return; // dial still pending: openTarget will do it
+      st.writeQueue = st.writeQueue
+        .then(() => st.writer.close())
+        .then(() => {
+          st.writeClosed = true;
+          finishIfDone(id, st);
+        })
+        .catch((e) => {
+          console.error("cornelius target half-close failed:", st.target.host, st.target.port, e && e.message ? e.message : e);
+          closeStream(id);
+        });
+    };
+
+    const pumpSocketToClient = async (id, st, socket, target) => {
       const reader = socket.readable.getReader();
       let bytes = 0;
       let outcome = "closed-clean";
@@ -104,7 +141,22 @@ export default {
       } finally {
         reader.releaseLock();
         console.error("cornelius pump ended:", target.host, target.port, "bytes=" + bytes, outcome);
-        closeStream(id);
+        // Only act if the stream is still live; after a client RST or a
+        // session close the client no longer tracks it.
+        if (streams.get(id) === st) {
+          if (outcome === "closed-clean") {
+            // Clean target EOF: FIN = "no more data from me", read-side
+            // EOF only. The write half stays open until the client's FIN.
+            sendFrame(CMD_FIN, id, new Uint8Array(0));
+            st.readDone = true;
+            finishIfDone(id, st);
+          } else {
+            // The socket broke: a FIN would claim the stream is still
+            // writable while we drop everything after it. Tell the client
+            // the truth with RST and tear the stream down.
+            closeStream(id);
+          }
+        }
       }
     };
 
@@ -113,8 +165,12 @@ export default {
       if (!st) return;
       let socket;
       try {
-        socket = connect({ hostname: target.host, port: target.port });
-            } catch (e) {
+        // allowHalfOpen: with the default (false) the runtime auto-closes
+        // the writable side when the target's readable side hits EOF
+        // (https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/#socketoptions).
+        // We manage each half explicitly, so keep the write side open.
+        socket = connect({ hostname: target.host, port: target.port }, { allowHalfOpen: true });
+      } catch (e) {
         // Diagnostic: the catch used to swallow this silently, so a failed
         // dial looked exactly like a dead tunnel. Log it so `wrangler tail`
         // shows the real reason (e.g. plan-gated sockets).
@@ -134,7 +190,13 @@ export default {
             closeStream(id);
           });
       }
-      ctx.waitUntil(pumpSocketToClient(id, socket, target));
+      // A client FIN that arrived before the dial finished: apply it now,
+      // queued behind the target header remainder above.
+      if (st.finRequested) {
+        st.finRequested = false;
+        halfCloseWrite(id, st);
+      }
+      ctx.waitUntil(pumpSocketToClient(id, st, socket, target));
     };
 
     const handleFrame = (cmd, streamId, payload) => {
@@ -147,6 +209,9 @@ export default {
               writeQueue: Promise.resolve(),
               target: null,
               closed: false,
+              writeClosed: false, // client -> target half done (writer closed)
+              finRequested: false, // client FIN seen; writer.close() queued
+              readDone: false, // target -> client half done (FIN sent)
             });
           }
           break;
@@ -154,6 +219,8 @@ export default {
         case CMD_PSH: {
           const st = streams.get(streamId);
           if (!st || st.closed) break;
+          // Data after the client's FIN violates half-close: drop it.
+          if (st.finRequested || st.writeClosed) break;
           if (!st.target) {
             // First data on a stream is the target header.
             const target = decodeTarget(payload);
@@ -176,6 +243,22 @@ export default {
           break;
         }
         case CMD_FIN: {
+          // Half-close only: the client is done SENDING. Close the
+          // socket's write side and keep reading the target's reply.
+          const st = streams.get(streamId);
+          if (!st || st.closed) break;
+          if (!st.target) {
+            // FIN before the target header: there is nothing to half-close
+            // and no socket will ever be opened. Reject with RST instead
+            // of leaking the stream.
+            closeStream(streamId);
+            break;
+          }
+          halfCloseWrite(streamId, st);
+          break;
+        }
+        case CMD_RST: {
+          // Full close of both halves, driven by the client.
           closeStream(streamId, "silent");
           break;
         }
