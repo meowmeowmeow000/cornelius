@@ -38,7 +38,7 @@ jobs:
           sudo apt-get install -y clang-18 llvm-18 libbpf-dev
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
           sudo ln -sf /usr/bin/llvm-strip-18 /usr/local/bin/llvm-strip
-          clang --versio
+          clang --version
       - name: Regenerate eBPF objects
         run: make ebpf
       - name: Committed objects are up to date
