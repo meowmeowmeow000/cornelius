@@ -101,20 +101,33 @@ func CompileCombatProfile(report *IntelligenceReport, outputPath string) (*confi
 		_ = ring.Save(ringPath)
 	}
 
-	// Preserve the WebSocket path from the existing profile. Freshly ranked
-	// routes never carry one (the scanner only verifies TLS), so without
-	// this a rescan silently drops default_ws_path and the daemon stops
-	// doing the WebSocket upgrade entirely — raw SMUX frames then hit
-	// Cloudflare's HTTPS port and the connection dies with EOF.
-	if primary.WSPath == "" {
-		if existing, err := config.LoadCombatProfile(outputPath); err == nil {
-			if ws := existing.Modules.StealthFactory.DefaultWSPath; ws != "" {
-				primary.WSPath = ws
-			}
+	// Preserve the settings a rescan must not silently drop. Freshly ranked
+	// routes carry neither a WebSocket path nor any ECH settings (the
+	// scanner only verifies TLS), so without this a rescan drops
+	// default_ws_path — the daemon stops doing the WebSocket upgrade
+	// entirely, raw SMUX frames hit Cloudflare's HTTPS port and the
+	// connection dies with EOF — and ech_enabled / ech_required /
+	// ech_config_b64, silently turning ECH off so the Worker hostname
+	// shows in the SNI again.
+	var echEnabled, echRequired bool
+	var echConfigB64 string
+	var preserved *config.CombatProfile
+	if existing, err := config.LoadCombatProfile(outputPath); err == nil {
+		sf := existing.Modules.StealthFactory
+		if primary.WSPath == "" && sf.DefaultWSPath != "" {
+			primary.WSPath = sf.DefaultWSPath
 		}
+		echEnabled, echRequired, echConfigB64 = sf.ECHEnabled, sf.ECHRequired, sf.ECHConfigB64
+		preserved = existing
 	}
 
 	profile := config.DefaultCombatProfile(report.WorkerHost, primary, failovers)
+	profile.Modules.StealthFactory.ECHEnabled = echEnabled
+	profile.Modules.StealthFactory.ECHRequired = echRequired
+	profile.Modules.StealthFactory.ECHConfigB64 = echConfigB64
+	if preserved != nil {
+		preserveUserSettings(profile, preserved)
+	}
 	data, err := json.MarshalIndent(profile, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal combat profile: %w", err)
@@ -123,6 +136,34 @@ func CompileCombatProfile(report *IntelligenceReport, outputPath string) (*confi
 		return nil, fmt.Errorf("write combat profile: %w", err)
 	}
 	return profile, nil
+}
+
+// preserveUserSettings carries the user-tunable settings of the profile
+// being overwritten onto the freshly compiled one, so a rescan only
+// replaces routes. Zero-valued groups (an older profile that predates the
+// field) keep the defaults. Of the XDP shield only RSTBurstThreshold is
+// preserved: Mode, TTLTolerance and ExpectedTTL are scan-derived and must
+// follow the fresh scan (e.g. a rescan that newly detects DPI must switch
+// the shield to lockdown).
+func preserveUserSettings(profile, existing *config.CombatProfile) {
+	if existing.OperationalDoctrine != (config.OperationalDoctrine{}) {
+		profile.OperationalDoctrine = existing.OperationalDoctrine
+	}
+	old, sf := existing.Modules, &profile.Modules.StealthFactory
+	if old.WarmPool != (config.WarmPoolConfig{}) {
+		profile.Modules.WarmPool = old.WarmPool
+	}
+	if old.XDPShield.RSTBurstThreshold != 0 {
+		profile.Modules.XDPShield.RSTBurstThreshold = old.XDPShield.RSTBurstThreshold
+	}
+	if old.StealthFactory.FallbackMode != "" {
+		sf.FallbackMode = old.StealthFactory.FallbackMode
+	}
+	sf.FragmentationDelayMs = old.StealthFactory.FragmentationDelayMs
+	sf.JitterMs = old.StealthFactory.JitterMs
+	if len(existing.ContingencyMatrix) > 0 {
+		profile.ContingencyMatrix = existing.ContingencyMatrix
+	}
 }
 
 func isBetterProbe(candidate, current ProbeResult) bool {
