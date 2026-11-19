@@ -32,8 +32,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24.2"
-      - name: Install clang and libbpf
-        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev
+      - name: Install clang 18 and libbpf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 libbpf-dev
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/llvm-strip-18 /usr/local/bin/llvm-strip
+          clang --versio
       - name: Regenerate eBPF objects
         run: make ebpf
       - name: Committed objects are up to date
