@@ -49,6 +49,7 @@ sees the real SNI — it arrives encrypted inside the ClientHello.
 - `SYN` opens a stream; the first `PSH` carries the target
   (`[hostLen][host][BE port]`) and the Worker dials it with
   `cloudflare:sockets`. Later `PSH` frames are forwarded to the socket.
-- `FIN` closes the stream's socket; `NOP` keepalives are echoed back so
-  the daemon's pool stays warm.
+- `FIN` half-closes (client done sending → `writer.close()` on the target
+  socket; the reply keeps flowing), `RST` fully closes the stream's
+  socket; `NOP` keepalives are echoed back so the daemon's pool stays warm.
 - Socket data flows back as `PSH` frames in WebSocket binary messages.
