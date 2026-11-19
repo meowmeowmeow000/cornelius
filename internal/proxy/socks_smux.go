@@ -377,6 +377,17 @@ func (st *smuxStream) Read(p []byte) (int, error) {
 }
 
 func (st *smuxStream) Write(p []byte) (int, error) {
+	// Fast path: the write side is already closed (CloseWrite or Close).
+	// Check before taking wmu — the CloseWrite FIN goroutine holds wmu
+	// while it sends, and on a dead peer that send blocks forever, so
+	// taking the lock first would wedge a Write after CloseWrite behind
+	// it instead of failing at once (this hung the race suite for the
+	// full 10m test timeout). The per-chunk check under wmu below is
+	// still the ordering guarantee: it catches a CloseWrite that lands
+	// after this check, so no PSH can follow a FIN.
+	if st.wClosed.Load() {
+		return 0, io.ErrClosedPipe
+	}
 	// wmu orders every PSH before the FIN that CloseWrite sends: the FIN
 	// goroutine takes the same lock, and the closed check is repeated per
 	// chunk under it, so no PSH can follow a FIN.

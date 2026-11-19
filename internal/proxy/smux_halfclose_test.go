@@ -274,8 +274,18 @@ func TestCloseWriteNeverBlocksOnDeadPeer(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("CloseWrite() blocked on a dead peer; it must send the FIN asynchronously")
 	}
-	if _, err := st.Write([]byte("x")); err == nil {
-		t.Fatal("Write after CloseWrite must fail immediately")
+	// Guarded with a timeout so a future regression fails fast with a
+	// clear message instead of hanging the whole package until the
+	// test timeout (that is how this deadlock surfaced in CI).
+	writeReturned := make(chan error, 1)
+	go func() { _, err := st.Write([]byte("x")); writeReturned <- err }()
+	select {
+	case err := <-writeReturned:
+		if err == nil {
+			t.Fatal("Write after CloseWrite must fail immediately")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Write after CloseWrite blocked; it must fail immediately")
 	}
 	// A following full close must not wedge behind the stuck FIN either.
 	closed := make(chan struct{})
