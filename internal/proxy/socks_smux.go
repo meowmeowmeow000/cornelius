@@ -510,8 +510,13 @@ type smuxManager struct {
 }
 
 func (m *smuxManager) openStream(ctx context.Context, host string, port uint16) (*smuxStream, error) {
+	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		sess, err := m.getOrDialSession(ctx)
+		// The first attempt may use a pooled connection; a retry must
+		// not draw another pooled one — a pooled connection that just
+		// proved dead was usually killed by the same idle window as
+		// the rest of the pool, so the retry dials fresh instead.
+		sess, err := m.getOrDialSession(ctx, attempt > 0)
 		if err != nil {
 			return nil, err
 		}
@@ -519,6 +524,8 @@ func (m *smuxManager) openStream(ctx context.Context, host string, port uint16) 
 		if err == nil {
 			return st, nil
 		}
+		lastErr = err
+		telemetry.Log.Warn("Failed to open multiplexed worker stream, retrying with a fresh session", slog.Int("attempt", attempt+1), slog.String("host", host), slog.String("err", err.Error()))
 		sess.Close()
 		m.mu.Lock()
 		if m.active == sess {
@@ -526,19 +533,27 @@ func (m *smuxManager) openStream(ctx context.Context, host string, port uint16) 
 		}
 		m.mu.Unlock()
 	}
-	return nil, errors.New("failed to open multiplexed worker stream after 3 attempts")
+	return nil, fmt.Errorf("failed to open multiplexed worker stream after 3 attempts: %w", lastErr)
 }
 
-func (m *smuxManager) getOrDialSession(ctx context.Context) (*smuxSession, error) {
-	m.mu.Lock()
-	if m.active != nil && !m.active.closed.Load() {
-		sess := m.active
+func (m *smuxManager) getOrDialSession(ctx context.Context, fresh bool) (*smuxSession, error) {
+	if !fresh {
+		m.mu.Lock()
+		if m.active != nil && !m.active.closed.Load() {
+			sess := m.active
+			m.mu.Unlock()
+			return sess, nil
+		}
 		m.mu.Unlock()
-		return sess, nil
 	}
-	m.mu.Unlock()
 
-	raw, err := m.warmPool.Acquire(ctx)
+	var raw net.Conn
+	var err error
+	if fresh {
+		raw, err = m.warmPool.AcquireFresh(ctx)
+	} else {
+		raw, err = m.warmPool.Acquire(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}

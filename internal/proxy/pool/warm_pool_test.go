@@ -108,7 +108,7 @@ func TestAllRoutesSkipsEmptyAndDedupes(t *testing.T) {
 func TestReplaceRoutesFromScanFillsBlanksAndDrains(t *testing.T) {
 	p := NewWarmPool(&config.CombatProfile{PrimaryRoute: testRoute("10.0.0.1")})
 	seeded, peer := net.Pipe()
-	p.pipes <- seeded
+	p.pipes <- pooledConn{conn: seeded, dialedAt: time.Now()}
 
 	before := telemetry.RouteRotations.Load()
 	primary := config.RouteCandidate{TargetIP: "10.0.0.9", StealthMode: factory.ModeTLSMicroFrag}
@@ -269,7 +269,7 @@ func TestAcquireSeededPipe(t *testing.T) {
 	p := NewWarmPool(nil)
 	a, b := net.Pipe()
 	defer b.Close()
-	p.pipes <- a
+	p.pipes <- pooledConn{conn: a, dialedAt: time.Now()}
 	conn, err := p.Acquire(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -333,7 +333,7 @@ func TestHandleLocalConnectionEcho(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close()
-	p.pipes <- upstream
+	p.pipes <- pooledConn{conn: upstream, dialedAt: time.Now()}
 
 	client, server := net.Pipe()
 	done := make(chan struct{})
@@ -389,7 +389,7 @@ func TestHandleLocalConnectionWithoutStart(t *testing.T) {
 	p := NewWarmPool(nil)
 	// NOTE: Start() is deliberately never called.
 	defer p.Close()
-	p.pipes <- upstream
+	p.pipes <- pooledConn{conn: upstream, dialedAt: time.Now()}
 
 	client, server := net.Pipe()
 	done := make(chan struct{})
@@ -420,7 +420,7 @@ func TestCloseDrainsPool(t *testing.T) {
 	p := NewWarmPool(nil)
 	a, b := net.Pipe()
 	defer b.Close()
-	p.pipes <- a
+	p.pipes <- pooledConn{conn: a, dialedAt: time.Now()}
 	p.Close()
 	if len(p.pipes) != 0 {
 		t.Fatal("Close must drain the pool")
@@ -478,4 +478,55 @@ func TestPoolReplenishesAgainstMockWorker(t *testing.T) {
 		t.Fatalf("Acquire after warm-up: %v", err)
 	}
 	_ = conn.Close()
+}
+
+// TestAcquireDiscardsStalePipe locks the idle-death fix: a pooled
+// connection dialed long ago must never be handed out. Live 2026-11-18
+// a SOCKS request drew ~50s-old pooled connections and failed to open
+// a stream three times, while a fresh dial worked.
+func TestAcquireDiscardsStalePipe(t *testing.T) {
+	p := NewWarmPool(nil)
+	stale, stalePeer := net.Pipe()
+	fresh, freshPeer := net.Pipe()
+	defer freshPeer.Close()
+	p.pipes <- pooledConn{conn: stale, dialedAt: time.Now().Add(-time.Minute)}
+	p.pipes <- pooledConn{conn: fresh, dialedAt: time.Now()}
+
+	conn, err := p.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if conn != fresh {
+		t.Fatal("Acquire must skip the stale pipe and return the fresh one")
+	}
+	if _, err := stalePeer.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("stale pipe was not closed by Acquire, err = %v", err)
+	}
+	if len(p.pipes) != 0 {
+		t.Fatal("Acquire must have consumed both seeded pipes")
+	}
+}
+
+// TestAcquireFreshBypassesStalePipe proves the retry path never draws
+// from the pool: with a stale pipe waiting, AcquireFresh dials instead
+// of returning it (here the dial fails fast on the closed port, which
+// is the point — the stale pipe is not the answer).
+func TestAcquireFreshBypassesStalePipe(t *testing.T) {
+	p := NewWarmPool(&config.CombatProfile{PrimaryRoute: testRoute("127.0.0.1")})
+	route := p.ActiveRoute()
+	route.TargetPort = 1
+	route.CleanSNI = "localhost"
+	p.ReplaceRoutesFromScan(route, nil)
+	stale, _ := net.Pipe()
+	p.pipes <- pooledConn{conn: stale, dialedAt: time.Now().Add(-time.Minute)}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := p.AcquireFresh(ctx); err == nil {
+		t.Fatal("AcquireFresh with an unreachable edge must fail, not return a pooled pipe")
+	}
+	if len(p.pipes) != 1 {
+		t.Fatal("AcquireFresh must leave the pool untouched")
+	}
 }

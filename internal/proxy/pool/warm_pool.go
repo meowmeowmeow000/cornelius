@@ -27,10 +27,31 @@ type WarmPool struct {
 	echConfigB64 string
 	defaultWS    string
 	capacity     int
-	pipes        chan net.Conn
+	pipes        chan pooledConn
 	ctx          context.Context
 	cancel       context.CancelFunc
 }
+
+// pooledConn is one dialed tunnel connection sitting in the pool, with
+// the time it was dialed so Acquire can tell a fresh one from a dead
+// one. A connection is only known good at dial time; nothing reads or
+// writes it while it waits, so age is the only liveness signal the
+// pool has.
+type pooledConn struct {
+	conn     net.Conn
+	dialedAt time.Time
+}
+
+// maxPooledIdleAge is how long a dialed connection may sit unused in
+// the pool before Acquire throws it away and dials fresh. Live
+// 2026-11-18: pooled connections worked when used within seconds and
+// died with broken pipe after ~40-50s idle (a middlebox, NAT, or the
+// edge closing idle TCP; the Worker itself has no idle timeout), so a
+// SOCKS request that drew a 50s-old connection failed to open a
+// stream three times in a row while a fresh dial worked. 20s keeps a
+// wide margin below the observed death, and the 2s maintainer keeps
+// the pool topped up with fresh connections.
+const maxPooledIdleAge = 20 * time.Second
 
 func NewWarmPool(profile *config.CombatProfile) *WarmPool {
 	capSize := 3
@@ -81,7 +102,7 @@ func NewWarmPool(profile *config.CombatProfile) *WarmPool {
 		echConfigB64: echConfigB64,
 		defaultWS:    defaultWS,
 		capacity:     capSize,
-		pipes:        make(chan net.Conn, capSize),
+		pipes:        make(chan pooledConn, capSize),
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -132,7 +153,7 @@ func (p *WarmPool) replenish() {
 			return
 		}
 		select {
-		case p.pipes <- conn:
+		case p.pipes <- pooledConn{conn: conn, dialedAt: time.Now()}:
 			telemetry.PoolHealthyPipes.Store(uint64(len(p.pipes)))
 		default:
 			_ = conn.Close()
@@ -158,18 +179,42 @@ func (p *WarmPool) dialCurrent(ctx context.Context) (net.Conn, error) {
 }
 
 func (p *WarmPool) Acquire(ctx context.Context) (net.Conn, error) {
-	select {
-	case conn := <-p.pipes:
-		telemetry.PoolHealthyPipes.Store(uint64(len(p.pipes)))
-		return conn, nil
-	default:
-		conn, err := p.dialCurrent(ctx)
-		if err != nil {
-			telemetry.DialFailures.Add(1)
-			return nil, err
+	for {
+		select {
+		case pc := <-p.pipes:
+			// A pooled connection is only known good when dialed. One
+			// that sat idle past maxPooledIdleAge is dead more often
+			// than not (broken pipe on first write); hand out a fresh
+			// dial instead of letting the caller burn a retry on it.
+			if time.Since(pc.dialedAt) > maxPooledIdleAge {
+				_ = pc.conn.Close()
+				telemetry.PoolHealthyPipes.Store(uint64(len(p.pipes)))
+				continue
+			}
+			telemetry.PoolHealthyPipes.Store(uint64(len(p.pipes)))
+			return pc.conn, nil
+		default:
+			conn, err := p.dialCurrent(ctx)
+			if err != nil {
+				telemetry.DialFailures.Add(1)
+				return nil, err
+			}
+			return conn, nil
 		}
-		return conn, nil
 	}
+}
+
+// AcquireFresh dials a new connection instead of taking one from the
+// pool. It is the retry path when a pooled connection just proved
+// dead: another pooled connection is likely dead for the same reason
+// (same idle window), so the retry must not draw from the pool again.
+func (p *WarmPool) AcquireFresh(ctx context.Context) (net.Conn, error) {
+	conn, err := p.dialCurrent(ctx)
+	if err != nil {
+		telemetry.DialFailures.Add(1)
+		return nil, err
+	}
+	return conn, nil
 }
 
 func (p *WarmPool) ActiveRoute() config.RouteCandidate {
@@ -342,8 +387,8 @@ func (p *WarmPool) EscalateStealthMode(mode string, fragDelayMs, jitterMs int) {
 func (p *WarmPool) drainPool() {
 	for {
 		select {
-		case c := <-p.pipes:
-			_ = c.Close()
+		case pc := <-p.pipes:
+			_ = pc.conn.Close()
 		default:
 			telemetry.PoolHealthyPipes.Store(0)
 			return
