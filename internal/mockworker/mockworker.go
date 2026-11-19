@@ -41,8 +41,17 @@ const (
 	cmdFIN      = 1
 	cmdPSH      = 2
 	cmdNOP      = 3
+	cmdRST      = 4 // full close; FIN is half-close only
 	smuxHdrSize = 8
 )
+
+// mockStream is one relayed stream: the target connection plus the state
+// of its two halves (guarded by relaySMUX's streamsMu).
+type mockStream struct {
+	conn      net.Conn
+	readDone  bool // target sent EOF; we sent FIN to the client
+	writeDone bool // client sent FIN; target's write side is closed
+}
 
 // Server is a running fake Worker listening on 127.0.0.1 with an
 // ephemeral port. Use Addr or Port to point a route at it.
@@ -190,20 +199,43 @@ func ServeConn(conn net.Conn, targetAddr, wsPath string) {
 
 // relaySMUX runs the SMUX frame loop: SYN opens nothing until the target
 // header arrives on the first PSH; later PSHs carry stream bytes; FIN
-// closes the target; NOP is a keepalive. Every stream dials targetAddr —
+// half-closes the target (write side only, like the real Worker); RST
+// closes it fully; NOP is a keepalive. Every stream dials targetAddr —
 // the fake does not implement the Worker's target selection, it proves
 // bytes flow session -> stream -> relay -> target and back.
 func relaySMUX(server net.Conn, br *bufio.Reader, targetAddr string) {
 	var writeMu sync.Mutex
-	streams := map[uint32]net.Conn{}
+	streams := map[uint32]*mockStream{}
 	var streamsMu sync.Mutex
 	defer func() {
 		streamsMu.Lock()
-		for _, tc := range streams {
-			_ = tc.Close()
+		for _, ms := range streams {
+			_ = ms.conn.Close()
 		}
 		streamsMu.Unlock()
 	}()
+	// finishLocked drops a stream once both halves are done. Caller holds
+	// streamsMu.
+	finishLocked := func(id uint32, ms *mockStream) {
+		if ms.readDone && ms.writeDone {
+			_ = ms.conn.Close()
+			if streams[id] == ms {
+				delete(streams, id)
+			}
+		}
+	}
+	// sendRST tells the client the stream is fully closed — the real
+	// Worker's answer to a dial failure, a socket write failure or a broken
+	// socket (FIN would claim the stream is still writable).
+	sendRST := func(id uint32) {
+		rst := make([]byte, smuxHdrSize)
+		rst[0] = smuxVersion
+		rst[1] = cmdRST
+		binary.LittleEndian.PutUint32(rst[4:8], id)
+		writeMu.Lock()
+		_ = writeWSFrame(server, rst)
+		writeMu.Unlock()
+	}
 	var rxBuf []byte
 	for {
 		msg, err := readWSFrame(br)
@@ -227,7 +259,7 @@ func relaySMUX(server net.Conn, br *bufio.Reader, targetAddr string) {
 			case cmdSYN: // nothing to do until the target header arrives
 			case cmdPSH:
 				streamsMu.Lock()
-				target, ok := streams[streamID]
+				ms, ok := streams[streamID]
 				streamsMu.Unlock()
 				if !ok {
 					// First PSH carries the target header:
@@ -245,20 +277,21 @@ func relaySMUX(server net.Conn, br *bufio.Reader, targetAddr string) {
 						continue
 					}
 					rest := payload[1+hostLen+2:]
-					var err error
-					target, err = net.DialTimeout("tcp", targetAddr, 5*time.Second)
+					target, err := net.DialTimeout("tcp", targetAddr, 5*time.Second)
 					if err != nil {
 						// The stream is dead; the session is not.
-						// Dropping this PSH (instead of returning)
+						// Answering RST (instead of returning)
 						// keeps one dead target from killing every
 						// other stream on the session.
+						sendRST(streamID)
 						continue
 					}
+					ms = &mockStream{conn: target}
 					streamsMu.Lock()
-					streams[streamID] = target
+					streams[streamID] = ms
 					streamsMu.Unlock()
-					go func(id uint32, tc net.Conn) {
-						defer tc.Close()
+					go func(id uint32, ms *mockStream) {
+						tc := ms.conn
 						buf := make([]byte, 16384)
 						for {
 							n, err := tc.Read(buf)
@@ -277,12 +310,31 @@ func relaySMUX(server net.Conn, br *bufio.Reader, targetAddr string) {
 								}
 							}
 							if err != nil {
-								// Target closed: tell the client, like
-								// the real Worker (pumpSocketToClient
-								// ends with closeStream -> FIN), so a
-								// client bug in FIN handling cannot
-								// pass against the mock and fail
-								// against the real Worker.
+								streamsMu.Lock()
+								live := streams[id] == ms
+								streamsMu.Unlock()
+								if !live {
+									// Already torn down (client RST, or a
+									// write failure that sent its own RST).
+									return
+								}
+								if err != io.EOF {
+									// Broken socket, not a clean EOF: RST,
+									// like the real Worker's pump error path.
+									streamsMu.Lock()
+									_ = tc.Close()
+									delete(streams, id)
+									streamsMu.Unlock()
+									sendRST(id)
+									return
+								}
+								// Target closed its side: send FIN (a
+								// half-close, like the real Worker's
+								// pumpSocketToClient) and keep the stream
+								// until the client has half-closed too, so
+								// a client bug in FIN handling cannot pass
+								// against the mock and fail against the
+								// real Worker.
 								fin := make([]byte, smuxHdrSize)
 								fin[0] = smuxVersion
 								fin[1] = cmdFIN
@@ -291,39 +343,62 @@ func relaySMUX(server net.Conn, br *bufio.Reader, targetAddr string) {
 								_ = writeWSFrame(server, fin)
 								writeMu.Unlock()
 								streamsMu.Lock()
-								delete(streams, id)
+								ms.readDone = true
+								finishLocked(id, ms)
 								streamsMu.Unlock()
 								return
 							}
 						}
-					}(streamID, target)
+					}(streamID, ms)
 					if len(rest) > 0 {
 						if _, err := target.Write(rest); err != nil {
 							streamsMu.Lock()
 							_ = target.Close()
 							delete(streams, streamID)
 							streamsMu.Unlock()
+							sendRST(streamID)
 							continue
 						}
 					}
 					continue
 				}
-				if _, err := target.Write(payload); err != nil {
+				streamsMu.Lock()
+				wd := ms.writeDone
+				streamsMu.Unlock()
+				if wd {
+					continue // write side already half-closed: drop late data
+				}
+				if _, err := ms.conn.Write(payload); err != nil {
 					// The target went away after the stream opened
 					// (e.g. the peer sent a late close_notify after
 					// the target already closed). Kill the stream,
 					// not the relay: a late PSH must not wedge the
 					// whole session.
 					streamsMu.Lock()
-					_ = target.Close()
+					_ = ms.conn.Close()
 					delete(streams, streamID)
 					streamsMu.Unlock()
+					sendRST(streamID)
 					continue
 				}
 			case cmdFIN:
+				// Half-close: only the target's write side ends; its
+				// replies keep flowing back until it closes.
 				streamsMu.Lock()
-				if target, ok := streams[streamID]; ok {
-					_ = target.Close()
+				if ms, ok := streams[streamID]; ok && !ms.writeDone {
+					if tc, isTCP := ms.conn.(*net.TCPConn); isTCP {
+						_ = tc.CloseWrite()
+					} else {
+						_ = ms.conn.Close()
+					}
+					ms.writeDone = true
+					finishLocked(streamID, ms)
+				}
+				streamsMu.Unlock()
+			case cmdRST:
+				streamsMu.Lock()
+				if ms, ok := streams[streamID]; ok {
+					_ = ms.conn.Close()
 					delete(streams, streamID)
 				}
 				streamsMu.Unlock()
