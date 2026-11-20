@@ -82,6 +82,68 @@ func TestFetchECHConfigListCaches(t *testing.T) {
 	}
 }
 
+func TestFetchECHConfigListNegativeCache(t *testing.T) {
+	// Fail first, then answer: proves the failure is cached (no second
+	// request), that it expires (a re-fetch happens), and that a later
+	// success clears the failure and populates the positive cache.
+	// Live, the ISP hijacks cloudflare-dns.com, so every dial burned up
+	// to 5s on a fetch that cannot succeed — roughly one attempt every
+	// 0.5s in the daemon log.
+	var hits atomic.Int32
+	var mode atomic.Int32 // 0 = fail, 1 = answer
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/dns-json")
+		if mode.Load() == 0 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("boom"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(dohAnswer(`1 . ech=` + testECHBase64)))
+	}))
+	defer srv.Close()
+
+	oldEndpoint := dohEndpoint
+	dohEndpoint = srv.URL
+	defer func() { dohEndpoint = oldEndpoint }()
+
+	host := "ech-negcache.example"
+	ctx := context.Background()
+
+	if _, err := FetchECHConfigList(ctx, host); err == nil {
+		t.Fatal("first fetch must fail")
+	}
+	if _, err := FetchECHConfigList(ctx, host); err == nil {
+		t.Fatal("second fetch must fail too")
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("DoH was queried %d times, want 1: the failure must be cached, not re-fetched", hits.Load())
+	}
+
+	// Age the cached failure past the window and let the server answer.
+	echCacheMu.Lock()
+	f := echFailCache[host]
+	f.at = time.Now().Add(-negativeECHCacheTTL - time.Second)
+	echFailCache[host] = f
+	echCacheMu.Unlock()
+	mode.Store(1)
+	if _, err := FetchECHConfigList(ctx, host); err != nil {
+		t.Fatalf("fetch after expiry failed: %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("DoH was queried %d times, want 2: the expired failure must re-fetch", hits.Load())
+	}
+	// The success must have cleared the failure and populated the
+	// positive cache: a fourth call fetches nothing.
+	if _, err := FetchECHConfigList(ctx, host); err != nil {
+		t.Fatalf("fourth fetch failed: %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("DoH was queried %d times, want 2: the success must be cached", hits.Load())
+	}
+}
+
 func TestFetchECHConfigListNoECH(t *testing.T) {
 	answer := dohAnswer(`1 . alpn=h3,h2 ipv4hint=104.21.75.30`)
 	srv := testDoHServer(t, answer, http.StatusOK, nil)

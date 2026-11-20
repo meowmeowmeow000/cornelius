@@ -48,25 +48,49 @@ type cachedECH struct {
 	expires time.Time
 }
 
+type cachedECHFailure struct {
+	err error
+	at  time.Time
+}
+
+// negativeECHCacheTTL is how long a failed fetch is remembered. Successes
+// are cached for the DNS TTL (5 minutes–1 hour) but failures were not
+// cached at all, so every dial re-fetched DoH against an endpoint that
+// cannot answer — live, the ISP hijacks cloudflare-dns.com to a private
+// IP, each fetch burns up to 5s, and the daemon fired one roughly every
+// 0.5s. 30s keeps the failure visible to the operator (the dialer logs
+// each attempt) while ending the churn.
+const negativeECHCacheTTL = 30 * time.Second
+
 var (
-	echCacheMu sync.Mutex
-	echCache   = map[string]cachedECH{}
+	echCacheMu   sync.Mutex
+	echCache     = map[string]cachedECH{}
+	echFailCache = map[string]cachedECHFailure{}
 )
 
 // FetchECHConfigList returns the raw serialized ECHConfigList for host,
 // ready for utls.Config.EncryptedClientHelloConfigList. Results are cached
 // per host for the DNS TTL (clamped to 5 minutes–1 hour). A fetch failure
-// is an error; the caller falls back to dialing without ECH.
+// is cached briefly too (see negativeECHCacheTTL) and returns the same
+// error without hitting the network again; the caller falls back to
+// dialing without ECH either way.
 func FetchECHConfigList(ctx context.Context, host string) ([]byte, error) {
 	echCacheMu.Lock()
 	if hit, ok := echCache[host]; ok && time.Now().Before(hit.expires) {
 		echCacheMu.Unlock()
 		return hit.list, nil
 	}
+	if fail, ok := echFailCache[host]; ok && time.Since(fail.at) < negativeECHCacheTTL {
+		echCacheMu.Unlock()
+		return nil, fail.err
+	}
 	echCacheMu.Unlock()
 
 	list, ttl, err := fetchECHConfigList(ctx, host)
 	if err != nil {
+		echCacheMu.Lock()
+		echFailCache[host] = cachedECHFailure{err: err, at: time.Now()}
+		echCacheMu.Unlock()
 		return nil, err
 	}
 	expires := time.Now().Add(ttl)
@@ -78,6 +102,7 @@ func FetchECHConfigList(ctx context.Context, host string) ([]byte, error) {
 	}
 	echCacheMu.Lock()
 	echCache[host] = cachedECH{list: list, expires: expires}
+	delete(echFailCache, host)
 	echCacheMu.Unlock()
 	return list, nil
 }

@@ -37,7 +37,29 @@ type wsConn struct {
 func (w *wsConn) WriteBinary(payload []byte) error {
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()
+	return w.writeFrameLocked(0x82, payload) // FIN + binary opcode
+}
 
+// WritePong answers a ping with a pong carrying the same payload. It is
+// best-effort by design: it is called from ReadMessage, which holds
+// readMu, so it must never block the read path — if another goroutine is
+// mid-write it skips the reply, and the write itself has a short
+// deadline so a dead peer cannot stall the reader either. An unanswered
+// ping can get the session killed by the edge, but a stalled readLoop
+// kills it for certain.
+func (w *wsConn) WritePong(payload []byte) {
+	if !w.writeMu.TryLock() {
+		return
+	}
+	defer w.writeMu.Unlock()
+	_ = w.raw.SetWriteDeadline(time.Now().Add(time.Second))
+	defer w.raw.SetWriteDeadline(time.Time{})
+	_ = w.writeFrameLocked(0x8A, payload) // FIN + pong opcode
+}
+
+// writeFrameLocked writes one masked client frame with the given opcode.
+// Callers must hold writeMu.
+func (w *wsConn) writeFrameLocked(opcode byte, payload []byte) error {
 	// RFC 6455: frames sent by a client MUST be masked, and the peer parses
 	// standard WebSocket frames (see ReadMessage). The SMUX payload therefore
 	// travels inside a binary frame. Writing raw bytes here used to be a
@@ -48,7 +70,7 @@ func (w *wsConn) WriteBinary(payload []byte) error {
 		return err
 	}
 	frame := make([]byte, 0, len(payload)+14)
-	frame = append(frame, 0x82) // FIN + binary opcode
+	frame = append(frame, opcode)
 	switch {
 	case len(payload) <= 125:
 		frame = append(frame, 0x80|byte(len(payload)))
@@ -124,7 +146,13 @@ func (w *wsConn) ReadMessage() ([]byte, error) {
 	case 0x08:
 		return nil, io.EOF
 	case 0x09:
-		return payload, nil
+		// Ping: never hand the payload to the SMUX parser — readLoop
+		// would parse it as a frame header and kill the session.
+		// Answer with a pong (best-effort) and report no message,
+		// exactly like pong (0x0A) already does; readLoop skips
+		// empty messages.
+		w.WritePong(payload)
+		return nil, nil
 	case 0x0A:
 		return nil, nil
 	case 0x00, 0x01, 0x02:
@@ -518,7 +546,17 @@ func (m *smuxManager) openStream(ctx context.Context, host string, port uint16) 
 		// the rest of the pool, so the retry dials fresh instead.
 		sess, err := m.getOrDialSession(ctx, attempt > 0)
 		if err != nil {
-			return nil, err
+			// A dial failure is the same dead-edge symptom as a
+			// stream failure, and it used to fail fast on attempt 0
+			// without retrying at all (live: a fresh dial to
+			// 104.18.0.181 timed out while doctor still passed).
+			// Rotate and retry while attempts remain.
+			lastErr = err
+			if ctx.Err() != nil || attempt >= 2 {
+				break
+			}
+			m.rotateForRetry(attempt)
+			continue
 		}
 		st, err := sess.OpenStream(ctx, host, port)
 		if err == nil {
@@ -532,8 +570,26 @@ func (m *smuxManager) openStream(ctx context.Context, host string, port uint16) 
 			m.active = nil
 		}
 		m.mu.Unlock()
+		if attempt >= 2 {
+			break
+		}
+		m.rotateForRetry(attempt)
 	}
 	return nil, fmt.Errorf("failed to open multiplexed worker stream after 3 attempts: %w", lastErr)
+}
+
+// rotateForRetry moves the pool to the next failover edge after a failed
+// attempt, so the retry dials a different edge instead of the same dead
+// one. Without it, all three attempts dial the one dead IP while the
+// failover list sits unused (live: 104.18.0.181 dead, 104.18.0.82
+// intermittent, retries never left .181). If there is no failover to
+// rotate to, the retry dials the same edge as before.
+func (m *smuxManager) rotateForRetry(attempt int) {
+	next, ok := m.warmPool.RotateToNextFailover()
+	if !ok {
+		return
+	}
+	telemetry.Log.Warn("Rotating to next failover edge for retry", slog.Int("attempt", attempt+2), slog.String("route", next.TargetIP))
 }
 
 func (m *smuxManager) getOrDialSession(ctx context.Context, fresh bool) (*smuxSession, error) {
