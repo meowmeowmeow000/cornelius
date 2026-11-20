@@ -293,7 +293,7 @@ func TestFetchECHConfigListOverConn(t *testing.T) {
 	list, ttl, err := FetchECHConfigListOverConn(context.Background(), "over-conn.example", raw, &tls.Config{
 		InsecureSkipVerify: true,
 		NextProtos:         []string{"http/1.1"},
-	})
+	}, "doh.test")
 	if err != nil {
 		t.Fatalf("over-conn fetch failed: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestFetchECHConfigListOverConnBadStatus(t *testing.T) {
 	}
 	defer raw.Close()
 
-	if _, _, err := FetchECHConfigListOverConn(context.Background(), "over-conn-500.example", raw, &tls.Config{InsecureSkipVerify: true}); err == nil {
+	if _, _, err := FetchECHConfigListOverConn(context.Background(), "over-conn-500.example", raw, &tls.Config{InsecureSkipVerify: true}, "doh.test"); err == nil {
 		t.Fatal("expected an error on DoH HTTP 500 through the tunnel")
 	}
 }

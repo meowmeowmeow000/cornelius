@@ -286,6 +286,9 @@ export default {
         if (rxBuf[0] !== SMUX_VERSION) {
           // Lost framing: this is unrecoverable, fail loudly with the code
           // the client logs, instead of silently garbling streams.
+          // Log the bad byte first: without it, a 1002 close in the
+          // tail is indistinguishable from an outer DPI kill.
+          console.error("cornelius bad smux version:", rxBuf[0], "streams=" + streams.size);
           try {
             server.close(1002, "Invalid SMUX version");
           } catch {}
@@ -308,10 +311,18 @@ export default {
       handleBytes(new Uint8Array(data));
     });
 
-    server.addEventListener("close", () => {
+    server.addEventListener("close", (event) => {
+      // Diagnostic: the outer WebSocket dying tears down every stream
+      // at once, and without this line a DPI kill of the tunnel looks
+      // exactly like a target-side close in the pump logs —
+      // closeStream("silent") unblocks the pump, which then logs
+      // "closed-clean". Log the outer death so wrangler tail shows it,
+      // not just its aftermath.
+      console.error("cornelius ws close:", event.code, event.reason, "streams=" + streams.size);
       for (const id of [...streams.keys()]) closeStream(id, "silent");
     });
-    server.addEventListener("error", () => {
+    server.addEventListener("error", (event) => {
+      console.error("cornelius ws error:", event.message || event.type, "streams=" + streams.size);
       for (const id of [...streams.keys()]) closeStream(id, "silent");
     });
 

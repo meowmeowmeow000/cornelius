@@ -143,14 +143,17 @@ func DecodeECHConfigB64(s string) ([]byte, error) {
 // FetchECHConfigListOverConn fetches the ECH config for host over an
 // already-established tunnel stream (conn), instead of a direct DoH
 // query: the request travels inside the tunnel, so the ISP sees no DoH
-// query at all and Cloudflare DNS sees the query coming from the
+// query at all and the resolver sees the query coming from the
 // Worker's egress, not the user's address. The conn must already be
-// connected to cloudflare-dns.com:443 — the caller opens the stream and
+// connected to resolverHost:443 — the caller opens the stream and
 // wraps it as a net.Conn; this function performs the TLS handshake over
 // it (verified against the system roots with tlsCfg, which must carry
-// ServerName cloudflare-dns.com) and the HTTPS request. Returns the raw
+// ServerName resolverHost) and the HTTPS request. Returns the raw
 // list and its TTL.
-func FetchECHConfigListOverConn(ctx context.Context, host string, conn net.Conn, tlsCfg *tls.Config) ([]byte, time.Duration, error) {
+func FetchECHConfigListOverConn(ctx context.Context, host string, conn net.Conn, tlsCfg *tls.Config, resolverHost string) ([]byte, time.Duration, error) {
+	if resolverHost == "" {
+		return nil, 0, errors.New("DoH over-tunnel resolver host is empty")
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -181,7 +184,13 @@ func FetchECHConfigListOverConn(ctx context.Context, host string, conn net.Conn,
 		// follow it with, and the DoH endpoint answers directly.
 		return http.ErrUseLastResponse
 	}}
-	q := "https://cloudflare-dns.com/dns-query?name=" + url.QueryEscape(host) + "&type=HTTPS"
+	// The DoH URL names the resolver the stream is already open to:
+	// it must agree with tlsCfg.ServerName, or the TLS handshake
+	// verifies the wrong name. (It was hardcoded to
+	// cloudflare-dns.com; the Worker cannot dial that host at all —
+	// its connect() refuses Cloudflare's own IPs — so the request
+	// died before any bytes flowed.)
+	q := "https://" + resolverHost + "/dns-query?name=" + url.QueryEscape(host) + "&type=HTTPS"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, q, nil)
 	if err != nil {
 		return nil, 0, err

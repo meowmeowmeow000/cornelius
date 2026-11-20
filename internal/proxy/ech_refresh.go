@@ -18,7 +18,7 @@ import (
 // The dialer's first ECH fetch goes out over direct DoH — at cold start
 // there is no tunnel yet to fetch through. But once a tunnel is up, every
 // refresh should ride inside it: the ISP then sees no DoH query at all,
-// and Cloudflare DNS sees the query coming from the Worker's egress
+// and the resolver sees the query coming from the Worker's egress
 // instead of the user's address. A refresher loop keeps the factory's
 // cache fresh through the tunnel, so the dialer almost never needs the
 // direct path after bootstrap.
@@ -31,7 +31,13 @@ import (
 // refresh through, so the pasted config remains the strict bootstrap.
 
 // dohHost is the DoH resolver the tunnel stream is opened to.
-const dohHost = "cloudflare-dns.com"
+// dns.google, not cloudflare-dns.com: Cloudflare Workers' connect()
+// refuses outbound TCP to Cloudflare's own IP space, so a stream to
+// cloudflare-dns.com is RST'd by the runtime before any bytes flow
+// (the client sees io.EOF ~150-330 ms after opening the stream, every
+// refresh tick). dns.google serves the same /dns-query endpoint and is
+// not a Cloudflare address, so the Worker can actually dial it.
+const dohHost = "dns.google"
 
 // streamConn adapts a SMUX stream to a net.Conn so the factory's
 // over-tunnel DoH exchange can run over it. A stream has no addresses
@@ -75,7 +81,7 @@ func fetchECHThroughSession(ctx context.Context, sess *smuxSession, host string)
 		return nil, 0, fmt.Errorf("could not open a tunnel stream to %s: %w", dohHost, err)
 	}
 	defer st.Close()
-	return factory.FetchECHConfigListOverConn(streamCtx, host, &streamConn{st}, overConnTLSConfig)
+	return factory.FetchECHConfigListOverConn(streamCtx, host, &streamConn{st}, overConnTLSConfig, dohHost)
 }
 
 // FetchECHConfigThroughConn fetches the ECH config for host through a
