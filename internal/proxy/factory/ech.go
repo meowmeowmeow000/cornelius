@@ -88,9 +88,18 @@ func FetchECHConfigList(ctx context.Context, host string) ([]byte, error) {
 
 	list, ttl, err := fetchECHConfigList(ctx, host)
 	if err != nil {
-		echCacheMu.Lock()
-		echFailCache[host] = cachedECHFailure{err: err, at: time.Now()}
-		echCacheMu.Unlock()
+		// Never cache a failure caused by the caller's own context:
+		// a cancelled or expired ctx (e.g. a SOCKS dialCtx that ran
+		// out mid-retry) is caller-local, not a DoH fact. Caching
+		// it would poison every dial for 30s — with ECHRequired
+		// that breaks dials outright, without it ECH silently
+		// turns off. A genuine DoH failure (ctx still alive, the
+		// fetch itself failed or timed out) is cached as before.
+		if ctx.Err() == nil {
+			echCacheMu.Lock()
+			echFailCache[host] = cachedECHFailure{err: err, at: time.Now()}
+			echCacheMu.Unlock()
+		}
 		return nil, err
 	}
 	expires := time.Now().Add(ttl)
@@ -206,6 +215,7 @@ func StoreECHConfig(host string, list []byte, ttl time.Duration) {
 	}
 	echCacheMu.Lock()
 	echCache[host] = cachedECH{list: list, expires: expires}
+	delete(echFailCache, host)
 	echCacheMu.Unlock()
 }
 

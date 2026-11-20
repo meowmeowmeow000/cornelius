@@ -34,6 +34,16 @@ func dohAnswer(data string) string {
 	return `{"Status":0,"Answer":[{"name":"h.example","type":65,"TTL":300,"data":"` + data + `"}]}`
 }
 
+// clearECHCacheFor removes one host from both ECH caches. The caches are
+// process-global, so any test that asserts DoH hit counts must clean up
+// or a repeat run (go test -count=2) inherits the first run's entries.
+func clearECHCacheFor(host string) {
+	echCacheMu.Lock()
+	delete(echCache, host)
+	delete(echFailCache, host)
+	echCacheMu.Unlock()
+}
+
 func TestFetchECHConfigList(t *testing.T) {
 	answer := dohAnswer(`1 . alpn=h3,h2 ipv4hint=104.21.75.30 ech=` + testECHBase64 + ` ipv6hint=2606:4700:3034::ac43:a703`)
 	srv := testDoHServer(t, answer, http.StatusOK, nil)
@@ -71,6 +81,7 @@ func TestFetchECHConfigListCaches(t *testing.T) {
 	defer func() { dohEndpoint = oldEndpoint }()
 
 	host := "ech-cache.example"
+	defer clearECHCacheFor(host)
 	if _, err := FetchECHConfigList(context.Background(), host); err != nil {
 		t.Fatalf("first fetch failed: %v", err)
 	}
@@ -110,6 +121,7 @@ func TestFetchECHConfigListNegativeCache(t *testing.T) {
 
 	host := "ech-negcache.example"
 	ctx := context.Background()
+	defer clearECHCacheFor(host)
 
 	if _, err := FetchECHConfigList(ctx, host); err == nil {
 		t.Fatal("first fetch must fail")
@@ -134,13 +146,65 @@ func TestFetchECHConfigListNegativeCache(t *testing.T) {
 	if hits.Load() != 2 {
 		t.Fatalf("DoH was queried %d times, want 2: the expired failure must re-fetch", hits.Load())
 	}
-	// The success must have cleared the failure and populated the
-	// positive cache: a fourth call fetches nothing.
+	// The success must have cleared the failure entry itself, not
+	// merely masked it behind the positive cache: check the map
+	// directly, or the delete() call could be dropped and the test
+	// would still pass.
+	echCacheMu.Lock()
+	_, stillFailed := echFailCache[host]
+	echCacheMu.Unlock()
+	if stillFailed {
+		t.Fatal("success did not delete the cached failure entry")
+	}
+	// The success must also have populated the positive cache: a
+	// fourth call fetches nothing.
 	if _, err := FetchECHConfigList(ctx, host); err != nil {
 		t.Fatalf("fourth fetch failed: %v", err)
 	}
 	if hits.Load() != 2 {
 		t.Fatalf("DoH was queried %d times, want 2: the success must be cached", hits.Load())
+	}
+}
+
+func TestFetchECHConfigListDoesNotCacheCancelledContext(t *testing.T) {
+	// A failure caused by the caller's own cancelled context is
+	// caller-local, not a DoH fact: it must not be cached, or one
+	// expired dialCtx would poison every dial for 30s.
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/dns-json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("boom"))
+	}))
+	defer srv.Close()
+
+	oldEndpoint := dohEndpoint
+	dohEndpoint = srv.URL
+	defer func() { dohEndpoint = oldEndpoint }()
+
+	host := "ech-ctx.example"
+	defer clearECHCacheFor(host)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := FetchECHConfigList(cancelled, host); err == nil {
+		t.Fatal("fetch with a cancelled context must fail")
+	}
+	echCacheMu.Lock()
+	_, cached := echFailCache[host]
+	echCacheMu.Unlock()
+	if cached {
+		t.Fatal("a context-cancellation failure was cached")
+	}
+	// A fresh context must re-query the network, not return the
+	// cancelled caller's error from the cache.
+	before := hits.Load()
+	if _, err := FetchECHConfigList(context.Background(), host); err == nil {
+		t.Fatal("fetch with a fresh context must fail against the 500 server")
+	}
+	if hits.Load() <= before {
+		t.Fatalf("DoH was queried %d times before and after, want a fresh query: the cancelled failure must not be cached", hits.Load())
 	}
 }
 

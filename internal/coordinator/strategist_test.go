@@ -80,6 +80,29 @@ func TestDecideDialFailure(t *testing.T) {
 	}
 }
 
+func TestShouldAnswerDialStreak(t *testing.T) {
+	cases := []struct {
+		name                       string
+		curFails, prevFails        uint64
+		curRotations, prevRotation uint64
+		threshold                  uint64
+		want                       bool
+	}{
+		{"streak, ring untouched", 3, 0, 0, 0, 3, true},
+		{"streak already answered by a rotation", 3, 0, 2, 0, 3, false},
+		{"bigger streak, still already answered", 5, 0, 1, 0, 3, false},
+		{"below threshold", 2, 0, 0, 0, 3, false},
+		{"no new failures", 3, 3, 0, 0, 3, false},
+		{"rotation from an earlier tick is not a veto", 6, 3, 2, 2, 3, true},
+	}
+	for _, tc := range cases {
+		if got := shouldAnswerDialStreak(tc.curFails, tc.prevFails, tc.curRotations, tc.prevRotation, tc.threshold); got != tc.want {
+			t.Errorf("%s: shouldAnswerDialStreak(%d, %d, %d, %d, %d) = %v, want %v",
+				tc.name, tc.curFails, tc.prevFails, tc.curRotations, tc.prevRotation, tc.threshold, got, tc.want)
+		}
+	}
+}
+
 // resetStrategistCounters zeroes the process-global telemetry the
 // strategist reads. These tests share the globals with each other (never
 // with other packages: each test binary is its own process), so every

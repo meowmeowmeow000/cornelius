@@ -79,6 +79,23 @@ func decideDialFailure(mode string, failoverCount int) dialFailureAction {
 	return dialActionNone
 }
 
+// shouldAnswerDialStreak reports whether a dial-failure streak needs a
+// strategist response. The streak alone is not enough: openStream already
+// rotates the ring on its own retries (two rotations for one 3-attempt
+// failure), so a streak the ring already answered must not trigger a
+// second escalation or rotation on top of it. Pure function, unit-tested.
+func shouldAnswerDialStreak(curFails, prevFails, curRotations, prevRotations, failThreshold uint64) bool {
+	if curFails <= prevFails || curFails-prevFails < failThreshold {
+		return false
+	}
+	// The ring moved since the last tick: something (openStream's
+	// retries, an IPC override) already answered these failures.
+	if curRotations > prevRotations {
+		return false
+	}
+	return true
+}
+
 func (s *Strategist) Start(ctx context.Context) {
 	pollMs, rstBurst, failThreshold := resolveStrategistThresholds(s.profile)
 
@@ -87,6 +104,7 @@ func (s *Strategist) Start(ctx context.Context) {
 
 	var prevDrops uint64
 	var prevFails uint64
+	var prevRotations uint64
 
 	for {
 		select {
@@ -95,6 +113,7 @@ func (s *Strategist) Start(ctx context.Context) {
 		case <-ticker.C:
 			curDrops := telemetry.XDPDroppedRSTs.Load()
 			curFails := telemetry.DialFailures.Load()
+			curRotations := telemetry.RouteRotations.Load()
 
 			if curDrops > prevDrops && decideRSTBurst(curDrops-prevDrops, rstBurst, telemetry.CurrentLockdownMode.Load() != 0) {
 				active := s.pool.ActiveRoute()
@@ -109,7 +128,7 @@ func (s *Strategist) Start(ctx context.Context) {
 					slog.Uint64("burst_drops", curDrops-prevDrops))
 			}
 
-			if curFails > prevFails && (curFails-prevFails) >= failThreshold {
+			if shouldAnswerDialStreak(curFails, prevFails, curRotations, prevRotations, failThreshold) {
 				active := s.pool.ActiveRoute()
 				switch decideDialFailure(active.StealthMode, s.pool.FailoverCount()) {
 				case dialActionEscalate:
@@ -132,6 +151,7 @@ func (s *Strategist) Start(ctx context.Context) {
 
 			prevDrops = curDrops
 			prevFails = curFails
+			prevRotations = curRotations
 		}
 	}
 }

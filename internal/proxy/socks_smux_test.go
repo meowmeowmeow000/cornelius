@@ -75,6 +75,11 @@ func TestWsConnPingIsNotAMessage(t *testing.T) {
 	}()
 
 	// Read the pong back: 0x8A, masked length 5, mask, masked payload.
+	// A read deadline keeps a regression that skips the pong from
+	// hanging the test until the binary timeout.
+	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("setting read deadline: %v", err)
+	}
 	hdr := make([]byte, 2)
 	if _, err := io.ReadFull(client, hdr); err != nil {
 		t.Fatalf("reading pong header: %v", err)
@@ -122,6 +127,76 @@ func TestWsConnPingIsNotAMessage(t *testing.T) {
 	}
 }
 
+func TestWsConnPingOver125BytesIsTruncated(t *testing.T) {
+	// RFC 6455 §5.5: control frames carry at most 125 bytes. A ping
+	// with a longer payload must be answered with a pong truncated to
+	// 125 bytes — never with an extended-length (126/127) pong, which
+	// a compliant peer closes with protocol error 1002.
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	w := &wsConn{raw: client}
+	r := &wsConn{raw: server}
+
+	payload := make([]byte, 200)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	go func() {
+		w.writeMu.Lock()
+		defer w.writeMu.Unlock()
+		_ = w.writeFrameLocked(0x89, payload) // FIN + ping opcode
+	}()
+
+	type result struct {
+		msg []byte
+		err error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		msg, err := r.ReadMessage()
+		resCh <- result{msg, err}
+	}()
+
+	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("setting read deadline: %v", err)
+	}
+	hdr := make([]byte, 2)
+	if _, err := io.ReadFull(client, hdr); err != nil {
+		t.Fatalf("reading pong header: %v", err)
+	}
+	// 0x8A, masked length 125 (0x80|125).
+	if hdr[0] != 0x8A || hdr[1] != 0xFD {
+		t.Fatalf("pong header = %02x %02x, want 8a fd (truncated to 125)", hdr[0], hdr[1])
+	}
+	var mask [4]byte
+	if _, err := io.ReadFull(client, mask[:]); err != nil {
+		t.Fatalf("reading pong mask: %v", err)
+	}
+	masked := make([]byte, 125)
+	if _, err := io.ReadFull(client, masked); err != nil {
+		t.Fatalf("reading pong payload: %v", err)
+	}
+	for i := range masked {
+		masked[i] ^= mask[i&3]
+	}
+	if !bytes.Equal(masked, payload[:125]) {
+		t.Fatal("pong payload is not the first 125 bytes of the ping payload")
+	}
+
+	select {
+	case res := <-resCh:
+		if res.err != nil {
+			t.Fatalf("ReadMessage() on an oversized ping returned error: %v", res.err)
+		}
+		if len(res.msg) != 0 {
+			t.Fatalf("ReadMessage() on an oversized ping returned %q, want no message", res.msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadMessage() on an oversized ping did not return")
+	}
+}
+
 func testDeadRoute(ip string) config.RouteCandidate {
 	return config.RouteCandidate{
 		TargetIP:        ip,
@@ -161,6 +236,34 @@ func TestOpenStreamRotatesFailoverOnDialFailure(t *testing.T) {
 	}
 	if got := p.ActiveRoute().TargetIP; got != "127.0.0.3" {
 		t.Fatalf("active route after retries = %q, want 127.0.0.3 (rotated twice)", got)
+	}
+}
+
+func TestOpenStreamRejectsEmptyHostWithoutRotating(t *testing.T) {
+	// A deterministic validation error (empty domain from a malformed
+	// SOCKS5 request) must fail before touching the session or the
+	// ring: no dial, no teardown, no rotation.
+	prof := &config.CombatProfile{
+		PrimaryRoute: testDeadRoute("127.0.0.1"),
+		FailoverRoutes: []config.RouteCandidate{
+			testDeadRoute("127.0.0.2"),
+		},
+	}
+	prof.Modules.StealthFactory.DefaultWSPath = "/secret-knock-99"
+	prof.Modules.StealthFactory.AllowInsecureCerts = true
+	p := pool.NewWarmPool(prof)
+	defer p.Close()
+	mgr := &smuxManager{warmPool: p}
+
+	_, err := mgr.openStream(context.Background(), "", 443)
+	if err == nil {
+		t.Fatal("openStream() with an empty host must fail")
+	}
+	if !strings.Contains(err.Error(), "invalid target host length") {
+		t.Fatalf("openStream() error = %q, want the host validation error", err.Error())
+	}
+	if got := p.ActiveRoute().TargetIP; got != "127.0.0.1" {
+		t.Fatalf("active route = %q, want 127.0.0.1 (no rotation on a validation error)", got)
 	}
 }
 

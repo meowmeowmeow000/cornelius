@@ -152,6 +152,14 @@ func (p *WarmPool) replenish() {
 			telemetry.DialFailures.Add(1)
 			return
 		}
+		// The dial ran unlocked for up to 5s; a rotation may have
+		// moved the active route meanwhile. A connection dialed to
+		// the old edge must not enter the pool after drainPool()
+		// cleared it for the new edge.
+		if cur := p.ActiveRoute(); cur.TargetIP != route.TargetIP {
+			_ = conn.Close()
+			return
+		}
 		select {
 		case p.pipes <- pooledConn{conn: conn, dialedAt: time.Now()}:
 			telemetry.PoolHealthyPipes.Store(uint64(len(p.pipes)))
@@ -350,6 +358,31 @@ func (p *WarmPool) SetSNISPFDirection(direction, spoofSNI string) {
 func (p *WarmPool) RotateToNextFailover() (config.RouteCandidate, bool) {
 	p.mu.Lock()
 	if len(p.failovers) == 0 {
+		p.mu.Unlock()
+		return config.RouteCandidate{}, false
+	}
+	old := p.activeRoute
+	next := p.failovers[0]
+	p.failovers = append(p.failovers[1:], old)
+	p.activeRoute = next
+	p.mu.Unlock()
+
+	p.drainPool()
+	telemetry.RouteRotations.Add(1)
+	telemetry.RecordEvent("POOL", "warn", fmt.Sprintf("Rotated edge %s -> %s", old.TargetIP, next.TargetIP))
+	return next, true
+}
+
+// RotateToNextFailoverIf rotates only if the active route is still the
+// one the caller started its attempt on. Concurrent SOCKS retries must
+// not each rotate independently — with N goroutines failing at once,
+// N unguarded rotations skip healthy failovers or wrap back onto the
+// dead primary. The compare-and-rotate happens under one lock, so at
+// most one of the concurrent failures moves the ring; the rest see the
+// route already moved and retry on the new edge.
+func (p *WarmPool) RotateToNextFailoverIf(current config.RouteCandidate) (config.RouteCandidate, bool) {
+	p.mu.Lock()
+	if len(p.failovers) == 0 || p.activeRoute.TargetIP != current.TargetIP {
 		p.mu.Unlock()
 		return config.RouteCandidate{}, false
 	}
