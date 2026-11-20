@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"cornelius/internal/config"
 	"cornelius/internal/proxy/pool"
 	"cornelius/internal/telemetry"
 )
@@ -43,18 +44,26 @@ func (w *wsConn) WriteBinary(payload []byte) error {
 // WritePong answers a ping with a pong carrying the same payload. It is
 // best-effort by design: it is called from ReadMessage, which holds
 // readMu, so it must never block the read path — if another goroutine is
-// mid-write it skips the reply, and the write itself has a short
-// deadline so a dead peer cannot stall the reader either. An unanswered
-// ping can get the session killed by the edge, but a stalled readLoop
-// kills it for certain.
-func (w *wsConn) WritePong(payload []byte) {
+// mid-write it skips the reply (nil error), and the write itself has a
+// short deadline so a dead peer cannot stall the reader either. An
+// unanswered ping can get the session killed by the edge, but a stalled
+// readLoop kills it for certain. A payload over 125 bytes is truncated:
+// RFC 6455 §5.5 requires control frames to carry at most 125 bytes, and
+// a longer pong would make a compliant peer close the connection with
+// protocol error 1002. A real write failure is returned, not swallowed:
+// a write timeout mid-TLS-record can leave the TLS write half broken,
+// and the session must die promptly instead of limping on.
+func (w *wsConn) WritePong(payload []byte) error {
 	if !w.writeMu.TryLock() {
-		return
+		return nil
 	}
 	defer w.writeMu.Unlock()
 	_ = w.raw.SetWriteDeadline(time.Now().Add(time.Second))
 	defer w.raw.SetWriteDeadline(time.Time{})
-	_ = w.writeFrameLocked(0x8A, payload) // FIN + pong opcode
+	if len(payload) > 125 {
+		payload = payload[:125]
+	}
+	return w.writeFrameLocked(0x8A, payload) // FIN + pong opcode
 }
 
 // writeFrameLocked writes one masked client frame with the given opcode.
@@ -150,8 +159,11 @@ func (w *wsConn) ReadMessage() ([]byte, error) {
 		// would parse it as a frame header and kill the session.
 		// Answer with a pong (best-effort) and report no message,
 		// exactly like pong (0x0A) already does; readLoop skips
-		// empty messages.
-		w.WritePong(payload)
+		// empty messages. A pong write failure is a dead session,
+		// so it is returned instead of hidden.
+		if err := w.WritePong(payload); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	case 0x0A:
 		return nil, nil
@@ -538,8 +550,21 @@ type smuxManager struct {
 }
 
 func (m *smuxManager) openStream(ctx context.Context, host string, port uint16) (*smuxStream, error) {
+	// A deterministic validation error (e.g. a malformed SOCKS5
+	// request with an empty domain) must not tear down a healthy
+	// session, rotate the ring, or drain the pool — fail before
+	// touching any shared state.
+	if len(host) == 0 || len(host) > 255 {
+		return nil, fmt.Errorf("invalid target host length: %d", len(host))
+	}
 	var lastErr error
+	attempts := 0
 	for attempt := 0; attempt < 3; attempt++ {
+		attempts = attempt + 1
+		// The route this attempt starts on: the rotation guard
+		// below only moves the ring if it is still this route, so
+		// concurrent failing requests cannot each spin it.
+		attemptRoute := m.warmPool.ActiveRoute()
 		// The first attempt may use a pooled connection; a retry must
 		// not draw another pooled one — a pooled connection that just
 		// proved dead was usually killed by the same idle window as
@@ -555,7 +580,7 @@ func (m *smuxManager) openStream(ctx context.Context, host string, port uint16) 
 			if ctx.Err() != nil || attempt >= 2 {
 				break
 			}
-			m.rotateForRetry(attempt)
+			m.rotateForRetry(attempt, attemptRoute)
 			continue
 		}
 		st, err := sess.OpenStream(ctx, host, port)
@@ -570,12 +595,15 @@ func (m *smuxManager) openStream(ctx context.Context, host string, port uint16) 
 			m.active = nil
 		}
 		m.mu.Unlock()
-		if attempt >= 2 {
+		// A cancelled context is not a dead edge: stop here instead
+		// of rotating and re-dialing with an already-dead ctx (which
+		// would also poison the ECH negative cache, see ech.go).
+		if ctx.Err() != nil || attempt >= 2 {
 			break
 		}
-		m.rotateForRetry(attempt)
+		m.rotateForRetry(attempt, attemptRoute)
 	}
-	return nil, fmt.Errorf("failed to open multiplexed worker stream after 3 attempts: %w", lastErr)
+	return nil, fmt.Errorf("failed to open multiplexed worker stream after %d attempts: %w", attempts, lastErr)
 }
 
 // rotateForRetry moves the pool to the next failover edge after a failed
@@ -583,9 +611,10 @@ func (m *smuxManager) openStream(ctx context.Context, host string, port uint16) 
 // one. Without it, all three attempts dial the one dead IP while the
 // failover list sits unused (live: 104.18.0.181 dead, 104.18.0.82
 // intermittent, retries never left .181). If there is no failover to
-// rotate to, the retry dials the same edge as before.
-func (m *smuxManager) rotateForRetry(attempt int) {
-	next, ok := m.warmPool.RotateToNextFailover()
+// rotate to, or another failing request already moved the ring, the
+// retry dials the current edge as before.
+func (m *smuxManager) rotateForRetry(attempt int, attemptRoute config.RouteCandidate) {
+	next, ok := m.warmPool.RotateToNextFailoverIf(attemptRoute)
 	if !ok {
 		return
 	}

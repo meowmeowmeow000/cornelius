@@ -210,6 +210,36 @@ func TestRotateToNextFailoverEmpty(t *testing.T) {
 	}
 }
 
+func TestRotateToNextFailoverIf(t *testing.T) {
+	// The guarded rotation only moves the ring when the caller is
+	// still on the route its attempt started on. Concurrent failing
+	// SOCKS requests must not each spin the ring (skipping healthy
+	// failovers or wrapping back onto the dead primary).
+	p := NewWarmPool(&config.CombatProfile{
+		PrimaryRoute:   testRoute("10.0.0.1"),
+		FailoverRoutes: []config.RouteCandidate{testRoute("10.0.0.2"), testRoute("10.0.0.3")},
+	})
+	first := p.ActiveRoute()
+	if _, ok := p.RotateToNextFailoverIf(testRoute("10.0.0.9")); ok {
+		t.Fatal("rotation with a stale route must report false")
+	}
+	if got := p.ActiveRoute().TargetIP; got != "10.0.0.1" {
+		t.Fatalf("stale rotation moved the active route to %s", got)
+	}
+	next, ok := p.RotateToNextFailoverIf(first)
+	if !ok || next.TargetIP != "10.0.0.2" {
+		t.Fatalf("guarded rotation = (%v, %v), want (10.0.0.2, true)", next.TargetIP, ok)
+	}
+	// The first route is stale now: a second concurrent failure that
+	// started on it must not rotate again.
+	if _, ok := p.RotateToNextFailoverIf(first); ok {
+		t.Fatal("a second failure on the stale route must not rotate again")
+	}
+	if got := p.ActiveRoute().TargetIP; got != "10.0.0.2" {
+		t.Fatalf("active = %s, want 10.0.0.2", got)
+	}
+}
+
 func TestEscalateStealthMode(t *testing.T) {
 	p := NewWarmPool(&config.CombatProfile{PrimaryRoute: testRoute("10.0.0.1")})
 	before := telemetry.ModeEscalations.Load()

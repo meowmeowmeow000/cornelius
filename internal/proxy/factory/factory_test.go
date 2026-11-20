@@ -35,6 +35,9 @@ func TestDialFallsBackWhenServerRejectsECH(t *testing.T) {
 	oldEndpoint := dohEndpoint
 	dohEndpoint = dohSrv.URL
 	defer func() { dohEndpoint = oldEndpoint }()
+	// The successful ECH fetch for "localhost" is cached for 5m; a
+	// repeat run would find it and never query DoH.
+	defer clearECHCacheFor("localhost")
 
 	// Plain TLS server (no ECH) on localhost with a self-signed cert.
 	cert := selfSignedLocalhostCert(t)
